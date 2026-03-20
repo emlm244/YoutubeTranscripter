@@ -107,26 +107,34 @@ class QueueLogger(StringIO):
 
     def flush(self) -> None:
         if self._buffer:
-            self._target_queue.put(("progress", self._buffer))
+            chunk = self._normalize_progress_chunk(self._buffer, complete=False)
+            if chunk:
+                self._target_queue.put(("progress", chunk))
             self._buffer = ""
 
     def _emit_complete_lines(self) -> None:
+        self._buffer = self._buffer.lstrip("\r")
         lines = self._buffer.splitlines(keepends=True)
-        if not lines:
-            return
-
-        # Check if the last line is complete (ends with a linebreak)
-        last_line = lines[-1]
-        if last_line.endswith(('\n', '\r')):
-            # All lines are complete
-            for line in lines:
-                self._target_queue.put(("progress", line))
-            self._buffer = ""
+        if lines and not lines[-1].endswith(("\n", "\r")):
+            self._buffer = lines.pop()
         else:
-            # Last line is partial, keep it in buffer
-            for line in lines[:-1]:
-                self._target_queue.put(("progress", line))
-            self._buffer = last_line
+            self._buffer = ""
+
+        for chunk in lines:
+            normalized = self._normalize_progress_chunk(chunk, complete=True)
+            if normalized:
+                self._target_queue.put(("progress", normalized))
+
+    @staticmethod
+    def _normalize_progress_chunk(text: str, *, complete: bool) -> str:
+        """Normalize carriage-return progress updates for append-only GUI output."""
+        normalized = text.lstrip("\r")
+        if complete:
+            if normalized.endswith("\r\n"):
+                normalized = normalized[:-2] + "\n"
+            elif normalized.endswith("\r"):
+                normalized = normalized[:-1] + "\n"
+        return normalized
 
 
 class QueueHandler(logging.Handler):
@@ -214,10 +222,7 @@ def _attach_worker_queue_logging(target_queue: queue.Queue[QueueMessage]) -> tup
 def _detach_worker_queue_logging(queue_handler: QueueHandler, logger_states: list[LoggerState]) -> None:
     """Restore worker logger configuration after a background task completes."""
     for logger_obj, original_level in logger_states:
-        try:
-            logger_obj.removeHandler(queue_handler)
-        except ValueError:
-            pass
+        logger_obj.removeHandler(queue_handler)
         logger_obj.setLevel(original_level)
 
 
@@ -1196,15 +1201,15 @@ class TranscriberGUI(QtWidgets.QMainWindow):
                             self.output_queue.put(("progress", "Grammar correction applied successfully.\n"))
                         else:
                             self.output_queue.put(("progress", "Grammar: No changes needed or unavailable.\n"))
+                        if output_format == "timestamped" and segments_data:
+                            formatted_transcript = format_transcript_with_timestamps(segments_data)
+                            self.output_queue.put(("transcript", formatted_transcript))
+                        else:
+                            self.output_queue.put(("transcript", transcript))
+                        self.output_queue.put(("segments", segments_data if segments_data else []))
                     except Exception as grammar_exc:
                         gui_logger.warning(f"Grammar correction failed: {grammar_exc}")
                         self.output_queue.put(("progress", f"Grammar correction skipped: {grammar_exc}\n"))
-                    if output_format == "timestamped" and segments_data:
-                        formatted_transcript = format_transcript_with_timestamps(segments_data)
-                        self.output_queue.put(("transcript", formatted_transcript))
-                    else:
-                        self.output_queue.put(("transcript", transcript))
-                    self.output_queue.put(("segments", segments_data if segments_data else []))
 
                 status_msg = "Transcription complete!"
                 if grammar_enhanced:
@@ -1333,11 +1338,11 @@ class TranscriberGUI(QtWidgets.QMainWindow):
                             self.output_queue.put(("progress", "Grammar correction applied.\n"))
                         else:
                             self.output_queue.put(("progress", "Grammar: No changes needed or unavailable.\n"))
+                        self.output_queue.put(("segments", segments_data))
+                        self.output_queue.put(("transcript", transcript))
                     except Exception as grammar_exc:
                         gui_logger.warning(f"Grammar correction failed: {grammar_exc}")
                         self.output_queue.put(("progress", f"Grammar correction skipped: {grammar_exc}\n"))
-                    self.output_queue.put(("segments", segments_data))
-                    self.output_queue.put(("transcript", transcript))
 
                 status_msg = "Transcription complete!"
                 if segments_data:
