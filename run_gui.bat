@@ -194,6 +194,34 @@ if !FIRST_RUN!==1 (
         echo [OK] All dependencies satisfied
     )
 )
+
+where nvidia-smi >nul 2>&1
+if not errorlevel 1 (
+    python -c "import torch; raise SystemExit(0 if getattr(torch.version, 'cuda', None) else 1)" >nul 2>&1
+    if errorlevel 1 (
+        echo [INFO] NVIDIA GPU detected but PyTorch is CPU-only. Installing CUDA-enabled PyTorch nightly wheels...
+        pip install --upgrade --pre torch torchvision torchaudio --index-url https://download.pytorch.org/whl/nightly/cu128
+        if errorlevel 1 (
+            echo [WARNING] CUDA-enabled PyTorch install failed. Whisper can still use CTranslate2 CUDA, but torch-backed grammar features will stay on CPU.
+        ) else (
+            echo [OK] CUDA-enabled PyTorch installed
+        )
+    )
+)
+
+python -c "from config import get_config; raise SystemExit(0 if get_config().grammar.enabled else 1)" >nul 2>&1
+if not errorlevel 1 (
+    python -c "from grammar_postprocessor import get_languagetool_runtime_status; status = get_languagetool_runtime_status(); raise SystemExit(0 if status.available else 1)" >nul 2>&1
+    if errorlevel 1 (
+        echo [INFO] Downloading LanguageTool standalone assets for local grammar fallback...
+        python -c "from language_tool_python.download_lt import download_lt; download_lt('6.6')"
+        if errorlevel 1 (
+            echo [WARNING] LanguageTool asset download failed. Grammar fallback will stay unavailable until this succeeds.
+        ) else (
+            echo [OK] LanguageTool standalone assets ready
+        )
+    )
+)
 echo.
 
 :skip_dependencies

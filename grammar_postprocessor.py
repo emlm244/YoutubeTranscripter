@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 import logging
+import os
 import sys
 import threading
 import urllib.request
@@ -43,6 +44,7 @@ VERB_DICT_URL = "https://raw.githubusercontent.com/grammarly/gector/master/data/
 
 _lt_instances: Dict[str, Any] = {}
 _lt_lock = threading.Lock()
+LANGUAGETOOL_DOWNLOAD_VERSION = "6.6"
 
 
 @dataclass(frozen=True)
@@ -81,6 +83,10 @@ def get_languagetool_runtime_status() -> LanguageToolRuntimeStatus:
     except Exception as exc:
         return LanguageToolRuntimeStatus(False, f"language_tool_python import failed: {exc}")
 
+    preferred_lt_dir = _get_preferred_languagetool_dir(language_tool_python)
+    if preferred_lt_dir is not None and "LTP_JAR_DIR_PATH" not in os.environ:
+        os.environ["LTP_JAR_DIR_PATH"] = str(preferred_lt_dir)
+
     try:
         java_path, jar_path = language_tool_python.utils.get_jar_info()
     except Exception as exc:
@@ -93,6 +99,23 @@ def get_languagetool_runtime_status() -> LanguageToolRuntimeStatus:
     if not java_binary.exists():
         return LanguageToolRuntimeStatus(False, f"Java runtime missing at {java_binary}")
     return LanguageToolRuntimeStatus(True, f"Ready at {jar_root}")
+
+
+def _get_preferred_languagetool_dir(language_tool_python: Any) -> Path | None:
+    """Prefer the known-good stable LanguageTool download when it is available."""
+    explicit_dir = os.environ.get("LTP_JAR_DIR_PATH")
+    if explicit_dir:
+        return Path(explicit_dir)
+
+    try:
+        download_root = language_tool_python.utils.get_language_tool_download_path()
+    except Exception:
+        return None
+
+    stable_dir = Path(download_root) / f"LanguageTool-{LANGUAGETOOL_DOWNLOAD_VERSION}"
+    if stable_dir.exists():
+        return stable_dir
+    return None
 
 
 def _get_languagetool(language: str = "en-US") -> Optional[Any]:  # -> language_tool_python.LanguageTool
@@ -116,7 +139,13 @@ def _get_languagetool(language: str = "en-US") -> Optional[Any]:  # -> language_
         try:
             import language_tool_python
             logger.info("Initializing LanguageTool...")
-            tool = language_tool_python.LanguageTool(language_key)
+            try:
+                tool = language_tool_python.LanguageTool(
+                    language_key,
+                    language_tool_download_version=LANGUAGETOOL_DOWNLOAD_VERSION,
+                )
+            except TypeError:
+                tool = language_tool_python.LanguageTool(language_key)
             _lt_instances[language_key] = tool
             logger.info("LanguageTool ready")
             return tool

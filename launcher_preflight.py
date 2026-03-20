@@ -101,6 +101,13 @@ def inspect_language_tool_runtime() -> PreflightItem:
     runtime_status = get_languagetool_runtime_status()
     if runtime_status.available:
         return PreflightItem("LanguageTool fallback", "ok", runtime_status.detail)
+    detail = runtime_status.detail.lower()
+    if "can't find languagetool-standalone" in detail or "assets missing" in detail:
+        return PreflightItem(
+            "LanguageTool fallback",
+            "info",
+            "Not cached yet. First fallback use will download local LanguageTool assets.",
+        )
 
     return PreflightItem(
         "LanguageTool fallback",
