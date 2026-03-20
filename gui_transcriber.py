@@ -13,6 +13,7 @@ from dataclasses import asdict
 import json
 import logging
 import os
+from pathlib import Path
 import queue
 import re
 import sys
@@ -80,6 +81,13 @@ warnings.filterwarnings("ignore", message=".*CUDA capability sm_120.*", category
 
 
 QueueMessage = tuple[Any, ...]
+LoggerState = tuple[logging.Logger, int]
+
+BACKEND_LOGGER_LEVELS: dict[str, int] = {
+    "youtube_transcriber": logging.INFO,
+    "grammar_postprocessor": logging.INFO,
+    "faster_whisper": logging.INFO,
+}
 
 
 class QueueLogger(StringIO):
@@ -88,14 +96,45 @@ class QueueLogger(StringIO):
     def __init__(self, target_queue: queue.Queue[QueueMessage]):
         super().__init__()
         self._target_queue = target_queue
+        self._buffer = ""
 
     def write(self, text: str) -> int:
-        if text:
-            self._target_queue.put(("progress", text))
+        if not text:
+            return 0
+        self._buffer += text
+        self._emit_complete_lines()
         return len(text)
 
     def flush(self) -> None:
-        return
+        if self._buffer:
+            chunk = self._normalize_progress_chunk(self._buffer, complete=False)
+            if chunk:
+                self._target_queue.put(("progress", chunk))
+            self._buffer = ""
+
+    def _emit_complete_lines(self) -> None:
+        self._buffer = self._buffer.lstrip("\r")
+        lines = self._buffer.splitlines(keepends=True)
+        if lines and not lines[-1].endswith(("\n", "\r")):
+            self._buffer = lines.pop()
+        else:
+            self._buffer = ""
+
+        for chunk in lines:
+            normalized = self._normalize_progress_chunk(chunk, complete=True)
+            if normalized:
+                self._target_queue.put(("progress", normalized))
+
+    @staticmethod
+    def _normalize_progress_chunk(text: str, *, complete: bool) -> str:
+        """Normalize carriage-return progress updates for append-only GUI output."""
+        normalized = text.lstrip("\r")
+        if complete:
+            if normalized.endswith("\r\n"):
+                normalized = normalized[:-2] + "\n"
+            elif normalized.endswith("\r"):
+                normalized = normalized[:-1] + "\n"
+        return normalized
 
 
 class QueueHandler(logging.Handler):
@@ -108,7 +147,9 @@ class QueueHandler(logging.Handler):
 
     def emit(self, record: logging.LogRecord) -> None:
         try:
-            msg = self.format(record)
+            msg = QueueLogger._normalize_progress_chunk(self.format(record), complete=True)
+            if msg and not msg.endswith("\n"):
+                msg += "\n"
             if msg:
                 self._target_queue.put(("progress", msg))
         except Exception:
@@ -119,19 +160,77 @@ class QueueHandler(logging.Handler):
 gui_logger = logging.getLogger(__name__)
 
 
-def setup_gui_logging(target_queue: queue.Queue[QueueMessage]) -> None:
-    """Set up logging for the GUI application."""
+def _build_rotating_file_handler(log_name: str) -> RotatingFileHandler:
+    """Create a consistent rotating file handler for GUI/backend logs."""
     file_handler = RotatingFileHandler(
-        get_log_path('gui_transcriber.log'),
-        maxBytes=10*1024*1024,
+        get_log_path(log_name),
+        maxBytes=10 * 1024 * 1024,
         backupCount=5,
-        encoding='utf-8'
+        encoding="utf-8",
     )
     file_handler.setLevel(logging.DEBUG)
-    file_handler.setFormatter(logging.Formatter(
-        '%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-        datefmt='%Y-%m-%d %H:%M:%S'
-    ))
+    file_handler.setFormatter(
+        logging.Formatter(
+            "%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+            datefmt="%Y-%m-%d %H:%M:%S",
+        )
+    )
+    return file_handler
+
+
+def _logger_has_handler_for_path(logger_obj: logging.Logger, log_path: Path) -> bool:
+    """Return whether the logger already writes to the given file path."""
+    target = str(log_path.resolve())
+    for handler in logger_obj.handlers:
+        base_filename = getattr(handler, "baseFilename", None)
+        if not base_filename:
+            continue
+        try:
+            if str(Path(base_filename).resolve()) == target:
+                return True
+        except OSError:
+            if base_filename == target:
+                return True
+    return False
+
+
+def setup_backend_logging_for_gui() -> None:
+    """Ensure backend modules write detailed logs when launched from the GUI."""
+    backend_log_path = get_log_path("youtube_transcriber.log")
+    for logger_name, level in BACKEND_LOGGER_LEVELS.items():
+        logger_obj = logging.getLogger(logger_name)
+        logger_obj.setLevel(level)
+        if not _logger_has_handler_for_path(logger_obj, backend_log_path):
+            logger_obj.addHandler(_build_rotating_file_handler("youtube_transcriber.log"))
+
+    logging.getLogger("yt_dlp").setLevel(logging.WARNING)
+
+
+def _attach_worker_queue_logging(target_queue: queue.Queue[QueueMessage]) -> tuple[QueueHandler, list[LoggerState]]:
+    """Attach GUI progress handlers to the backend loggers used by worker threads."""
+    queue_handler = QueueHandler(target_queue)
+    queue_handler.setLevel(logging.INFO)
+
+    logger_states: list[LoggerState] = []
+    for logger_name, level in BACKEND_LOGGER_LEVELS.items():
+        logger_obj = logging.getLogger(logger_name)
+        logger_states.append((logger_obj, logger_obj.level))
+        logger_obj.setLevel(level)
+        logger_obj.addHandler(queue_handler)
+
+    return queue_handler, logger_states
+
+
+def _detach_worker_queue_logging(queue_handler: QueueHandler, logger_states: list[LoggerState]) -> None:
+    """Restore worker logger configuration after a background task completes."""
+    for logger_obj, original_level in logger_states:
+        logger_obj.removeHandler(queue_handler)
+        logger_obj.setLevel(original_level)
+
+
+def setup_gui_logging(target_queue: queue.Queue[QueueMessage]) -> None:
+    """Set up logging for the GUI application."""
+    file_handler = _build_rotating_file_handler("gui_transcriber.log")
 
     queue_handler = QueueHandler(target_queue)
     queue_handler.setLevel(logging.INFO)
@@ -185,6 +284,7 @@ class TranscriberGUI(QtWidgets.QMainWindow):
 
         # Set up logging
         setup_gui_logging(self.output_queue)
+        setup_backend_logging_for_gui()
 
         # Apply theme
         app = QtWidgets.QApplication.instance()
@@ -1006,16 +1106,11 @@ class TranscriberGUI(QtWidgets.QMainWindow):
         transcription_config = transcription_config or self._build_transcription_config()
         grammar_config = grammar_config or self._build_grammar_config()
 
-        queue_handler = QueueHandler(self.output_queue)
-        queue_handler.setLevel(logging.INFO)
-        backend_logger = logging.getLogger('youtube_transcriber')
-
+        queue_handler, logger_states = _attach_worker_queue_logging(self.output_queue)
         progress_redirector = QueueLogger(self.output_queue)
         old_stdout = sys.stdout
 
         try:
-            # Add handler inside try block to ensure cleanup on any exception
-            backend_logger.addHandler(queue_handler)
             sys.stdout = progress_redirector
 
             self.output_queue.put(("status", "Validating URL...", self.theme.colors.warning))
@@ -1070,7 +1165,7 @@ class TranscriberGUI(QtWidgets.QMainWindow):
                     self.output_queue.put(("error", "Failed to download audio for transcription."))
                     return
 
-                self.output_queue.put(("status", "Transcribing audio (this may take a while)...", self.theme.colors.warning))
+                self.output_queue.put(("status", "Loading Whisper and transcribing audio...", self.theme.colors.warning))
 
                 # Unload GECToR model to free GPU memory for Whisper
                 unload_gector()
@@ -1085,10 +1180,17 @@ class TranscriberGUI(QtWidgets.QMainWindow):
                 return
 
             if transcript:
+                if output_format == "timestamped" and segments_data:
+                    formatted_transcript = format_transcript_with_timestamps(segments_data)
+                    self.output_queue.put(("transcript", formatted_transcript))
+                else:
+                    self.output_queue.put(("transcript", transcript))
+                self.output_queue.put(("segments", segments_data if segments_data else []))
+
                 # Grammar Post-Processing (if enabled)
                 grammar_enhanced = False
                 if grammar_config.enabled:
-                    self.output_queue.put(("status", "Fixing grammar...", self.theme.colors.warning))
+                    self.output_queue.put(("status", "Applying grammar corrections...", self.theme.colors.warning))
                     self.output_queue.put(("progress", "\nStarting grammar correction...\n"))
 
                     try:
@@ -1101,17 +1203,15 @@ class TranscriberGUI(QtWidgets.QMainWindow):
                             self.output_queue.put(("progress", "Grammar correction applied successfully.\n"))
                         else:
                             self.output_queue.put(("progress", "Grammar: No changes needed or unavailable.\n"))
+                        if output_format == "timestamped" and segments_data:
+                            formatted_transcript = format_transcript_with_timestamps(segments_data)
+                            self.output_queue.put(("transcript", formatted_transcript))
+                        else:
+                            self.output_queue.put(("transcript", transcript))
+                        self.output_queue.put(("segments", segments_data if segments_data else []))
                     except Exception as grammar_exc:
                         gui_logger.warning(f"Grammar correction failed: {grammar_exc}")
                         self.output_queue.put(("progress", f"Grammar correction skipped: {grammar_exc}\n"))
-
-                self.output_queue.put(("segments", segments_data if segments_data else []))
-
-                if output_format == "timestamped" and segments_data:
-                    formatted_transcript = format_transcript_with_timestamps(segments_data)
-                    self.output_queue.put(("transcript", formatted_transcript))
-                else:
-                    self.output_queue.put(("transcript", transcript))
 
                 status_msg = "Transcription complete!"
                 if grammar_enhanced:
@@ -1125,8 +1225,9 @@ class TranscriberGUI(QtWidgets.QMainWindow):
             self.output_queue.put(("error", f"Error: {exc}"))
         finally:
             # Always restore stdout and remove handler
+            progress_redirector.flush()
             sys.stdout = old_stdout
-            backend_logger.removeHandler(queue_handler)
+            _detach_worker_queue_logging(queue_handler, logger_states)
             self.output_queue.put(("transcribe_finished", ""))
             self.output_queue.put(("transcribe_thread_done", ""))
 
@@ -1195,18 +1296,15 @@ class TranscriberGUI(QtWidgets.QMainWindow):
         grammar_config: GrammarConfig,
     ) -> None:
         """Background thread for local file transcription."""
-        queue_handler = QueueHandler(self.output_queue)
-        queue_handler.setLevel(logging.INFO)
-        backend_logger = logging.getLogger('youtube_transcriber')
-
+        queue_handler, logger_states = _attach_worker_queue_logging(self.output_queue)
         progress_redirector = QueueLogger(self.output_queue)
         old_stdout = sys.stdout
 
         try:
-            backend_logger.addHandler(queue_handler)
             sys.stdout = progress_redirector
 
-            self.output_queue.put(("status", "Starting transcription...", self.theme.colors.warning))
+            self.output_queue.put(("status", "Preparing local file...", self.theme.colors.warning))
+            self.output_queue.put(("progress", f"Selected file: {file_path}\n"))
 
             # Unload GECToR model to free GPU memory for Whisper
             self.output_queue.put(("progress", "Freeing GPU memory...\n"))
@@ -1216,6 +1314,7 @@ class TranscriberGUI(QtWidgets.QMainWindow):
                 torch_module.cuda.empty_cache()
 
             ffmpeg_location = find_ffmpeg()
+            self.output_queue.put(("status", "Analyzing audio tracks and loading Whisper...", self.theme.colors.warning))
 
             transcript, segments_data = transcribe_local_file(
                 file_path=file_path,
@@ -1224,8 +1323,12 @@ class TranscriberGUI(QtWidgets.QMainWindow):
             )
 
             if transcript.strip():
+                self.output_queue.put(("segments", segments_data))
+                self.output_queue.put(("transcript", transcript))
+
                 grammar_enhanced = False
                 if grammar_config.enabled:
+                    self.output_queue.put(("status", "Applying grammar corrections...", self.theme.colors.warning))
                     self.output_queue.put(("progress", "Fixing grammar...\n"))
                     try:
                         transcript, segments_data, grammar_enhanced = post_process_grammar(
@@ -1237,12 +1340,11 @@ class TranscriberGUI(QtWidgets.QMainWindow):
                             self.output_queue.put(("progress", "Grammar correction applied.\n"))
                         else:
                             self.output_queue.put(("progress", "Grammar: No changes needed or unavailable.\n"))
+                        self.output_queue.put(("segments", segments_data))
+                        self.output_queue.put(("transcript", transcript))
                     except Exception as grammar_exc:
                         gui_logger.warning(f"Grammar correction failed: {grammar_exc}")
                         self.output_queue.put(("progress", f"Grammar correction skipped: {grammar_exc}\n"))
-
-                self.output_queue.put(("segments", segments_data))
-                self.output_queue.put(("transcript", transcript))
 
                 status_msg = "Transcription complete!"
                 if segments_data:
@@ -1267,8 +1369,9 @@ class TranscriberGUI(QtWidgets.QMainWindow):
             gui_logger.error(f"Local file transcription error: {exc}", exc_info=True)
             self.output_queue.put(("error", f"Error: {exc}"))
         finally:
+            progress_redirector.flush()
             sys.stdout = old_stdout
-            backend_logger.removeHandler(queue_handler)
+            _detach_worker_queue_logging(queue_handler, logger_states)
             self.output_queue.put(("transcribe_finished", ""))
             self.output_queue.put(("local_file_done", ""))
 
@@ -1976,4 +2079,3 @@ if __name__ == "__main__":
     except Exception as exc:
         QtWidgets.QMessageBox.critical(None, "Fatal Error", f"Application error: {exc}")
         sys.exit(1)
-
