@@ -111,15 +111,22 @@ class QueueLogger(StringIO):
             self._buffer = ""
 
     def _emit_complete_lines(self) -> None:
-        while True:
-            newline_indexes = [index for index in (self._buffer.find("\n"), self._buffer.find("\r")) if index >= 0]
-            if not newline_indexes:
-                break
-            split_at = min(newline_indexes) + 1
-            chunk = self._buffer[:split_at]
-            self._buffer = self._buffer[split_at:]
-            if chunk:
-                self._target_queue.put(("progress", chunk))
+        lines = self._buffer.splitlines(keepends=True)
+        if not lines:
+            return
+
+        # Check if the last line is complete (ends with a linebreak)
+        last_line = lines[-1]
+        if last_line.endswith(('\n', '\r')):
+            # All lines are complete
+            for line in lines:
+                self._target_queue.put(("progress", line))
+            self._buffer = ""
+        else:
+            # Last line is partial, keep it in buffer
+            for line in lines[:-1]:
+                self._target_queue.put(("progress", line))
+            self._buffer = last_line
 
 
 class QueueHandler(logging.Handler):
@@ -2065,4 +2072,3 @@ if __name__ == "__main__":
     except Exception as exc:
         QtWidgets.QMessageBox.critical(None, "Fatal Error", f"Application error: {exc}")
         sys.exit(1)
-
