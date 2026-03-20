@@ -1,0 +1,57 @@
+[tool.pytest.ini_options]
+addopts = "-q"
+testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 140
+extend-exclude = [
+    "build",
+    "dist",
+    "venv",
+    "hf-cache",
+    "tmp",
+    ".hypothesis",
+    ".mypy_cache",
+    ".pytest_cache",
+    ".ruff_cache",
+    "__pycache__",
+]
+
+[tool.ruff.lint]
+select = ["E", "F"]
+
+[tool.pyright]
+pythonVersion = "3.12"
+venvPath = "."
+venv = "venv"
+typeCheckingMode = "basic"
+include = [
+    "app_paths.py",
+    "audio_preprocessor.py",
+    "config.py",
+    "exceptions.py",
+    "grammar_postprocessor.py",
+    "gui_runtime_bootstrap.py",
+    "gui_transcriber.py",
+    "launcher_preflight.py",
+    "runtime_bootstrap.py",
+    "themes.py",
+    "torch_runtime.py",
+    "transcript_types.py",
+    "youtube_transcriber.py",
+    "widgets",
+    "tests",
+]
+exclude = [
+    "build",
+    "dist",
+    "venv",
+    "hf-cache",
+    "tmp",
+    ".hypothesis",
+    ".mypy_cache",
+    ".pytest_cache",
+    ".ruff_cache",
+    "__pycache__",
+]
