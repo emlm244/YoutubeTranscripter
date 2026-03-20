@@ -147,7 +147,9 @@ class QueueHandler(logging.Handler):
 
     def emit(self, record: logging.LogRecord) -> None:
         try:
-            msg = self.format(record)
+            msg = QueueLogger._normalize_progress_chunk(self.format(record), complete=True)
+            if msg and not msg.endswith("\n"):
+                msg += "\n"
             if msg:
                 self._target_queue.put(("progress", msg))
         except Exception:

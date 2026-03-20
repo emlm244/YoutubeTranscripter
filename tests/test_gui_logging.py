@@ -13,6 +13,7 @@ import gui_transcriber as gt
 from config import GrammarConfig, TranscriptionConfig
 from gui_transcriber import (
     QueueLogger,
+    QueueHandler,
     TranscriberGUI,
     _attach_worker_queue_logging,
     _detach_worker_queue_logging,
@@ -83,7 +84,7 @@ def test_worker_queue_logging_temporarily_enables_backend_info_logs() -> None:
             assert queue_handler in logger_obj.handlers
 
         logging.getLogger("youtube_transcriber").info("Backend progress is visible")
-        assert target_queue.get_nowait() == ("progress", "Backend progress is visible")
+        assert target_queue.get_nowait() == ("progress", "Backend progress is visible\n")
     finally:
         _detach_worker_queue_logging(queue_handler, logger_states)
 
@@ -91,6 +92,27 @@ def test_worker_queue_logging_temporarily_enables_backend_info_logs() -> None:
         logger_obj = logging.getLogger(logger_name)
         assert queue_handler not in logger_obj.handlers
         assert logger_obj.level == original_levels[logger_name]
+
+
+def test_queue_handler_terminates_each_log_record_with_newline() -> None:
+    """Logger records should remain visually separated in the GUI progress pane."""
+    target_queue: queue.Queue[tuple[object, ...]] = queue.Queue()
+    handler = QueueHandler(target_queue)
+
+    logger = logging.getLogger("tmp-gui-queue-handler")
+    logger.handlers.clear()
+    logger.setLevel(logging.INFO)
+    logger.propagate = False
+    logger.addHandler(handler)
+    try:
+        logger.info("Line one")
+        logger.info("Line two")
+    finally:
+        logger.removeHandler(handler)
+
+    assert target_queue.get_nowait() == ("progress", "Line one\n")
+    assert target_queue.get_nowait() == ("progress", "Line two\n")
+    assert target_queue.empty()
 
 
 def _build_fake_gui() -> Any:
