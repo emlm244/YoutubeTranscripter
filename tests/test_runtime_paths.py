@@ -3,7 +3,30 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
+import pytest
+
 import app_paths
+
+
+@pytest.fixture(autouse=True)
+def _restore_runtime_environment():
+    original_values = {
+        key: os.environ.get(key)
+        for key in ("HF_HOME", "HUGGINGFACE_HUB_CACHE", "TRANSFORMERS_CACHE", "PATH")
+    }
+    original_handles = list(app_paths._WINDOWS_DLL_DIRECTORY_HANDLES)
+    original_registered = set(app_paths._REGISTERED_WINDOWS_DLL_DIRS)
+    try:
+        yield
+    finally:
+        for key, value in original_values.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+        app_paths._WINDOWS_DLL_DIRECTORY_HANDLES[:] = original_handles
+        app_paths._REGISTERED_WINDOWS_DLL_DIRS.clear()
+        app_paths._REGISTERED_WINDOWS_DLL_DIRS.update(original_registered)
 
 
 def test_get_ffmpeg_search_roots_includes_app_and_resource_locations(monkeypatch, tmp_path: Path):
@@ -86,64 +109,24 @@ def test_configure_runtime_environment_prefixes_existing_windows_dll_roots(monke
     assert os.environ["PATH"].split(os.pathsep)[0] == str(resource_root.resolve())
 
 
-def test_preload_windows_torch_dependencies_loads_core_dlls(monkeypatch, tmp_path: Path):
-    torch_lib_dir = tmp_path / "torch" / "lib"
-    torch_lib_dir.mkdir(parents=True)
-    for name in ("libiomp5md.dll", "torch_global_deps.dll", "c10.dll", "shm.dll", "torch_cpu.dll", "torch_python.dll"):
-        (torch_lib_dir / name).write_bytes(b"")
+def test_register_windows_dll_directory_retains_handle(monkeypatch, tmp_path: Path):
+    calls: list[str] = []
+    handles = []
 
-    loaded: list[str] = []
+    def _fake_add_dll_directory(path: str):
+        calls.append(path)
+        handle = object()
+        handles.append(handle)
+        return handle
 
-    class _FakeCtypes:
-        @staticmethod
-        def WinDLL(path: str):
-            loaded.append(path)
+    dll_dir = tmp_path / "dlls"
+    dll_dir.mkdir()
 
-    monkeypatch.setattr(app_paths, "_get_torch_dll_dir", lambda: torch_lib_dir)
-    monkeypatch.setattr(app_paths.sys, "platform", "win32")
-    monkeypatch.setitem(__import__("sys").modules, "ctypes", _FakeCtypes())
+    monkeypatch.setattr(app_paths.os, "add_dll_directory", _fake_add_dll_directory, raising=False)
+    app_paths._WINDOWS_DLL_DIRECTORY_HANDLES.clear()
+    app_paths._REGISTERED_WINDOWS_DLL_DIRS.clear()
 
-    statuses = app_paths.preload_windows_torch_dependencies()
-
-    assert statuses == [
-        "libiomp5md.dll=ok",
-        "torch_global_deps.dll=ok",
-        "c10.dll=ok",
-        "shm.dll=ok",
-        "torch_cpu.dll=ok",
-        "torch_python.dll=ok",
-    ]
-    assert loaded == [str(torch_lib_dir / name) for name in (
-        "libiomp5md.dll",
-        "torch_global_deps.dll",
-        "c10.dll",
-        "shm.dll",
-        "torch_cpu.dll",
-        "torch_python.dll",
-    )]
-
-
-def test_preload_windows_torch_dependencies_reports_failures(monkeypatch, tmp_path: Path):
-    torch_lib_dir = tmp_path / "torch" / "lib"
-    torch_lib_dir.mkdir(parents=True)
-    (torch_lib_dir / "c10.dll").write_bytes(b"")
-
-    class _FakeOSError(OSError):
-        def __init__(self):
-            super().__init__("boom")
-            self.winerror = 1114
-
-    class _FakeCtypes:
-        @staticmethod
-        def WinDLL(path: str):
-            raise _FakeOSError()
-
-    monkeypatch.setattr(app_paths, "_get_torch_dll_dir", lambda: torch_lib_dir)
-    monkeypatch.setattr(app_paths.sys, "platform", "win32")
-    monkeypatch.setitem(__import__("sys").modules, "ctypes", _FakeCtypes())
-
-    statuses = app_paths.preload_windows_torch_dependencies()
-
-    assert statuses[0] == "libiomp5md.dll=missing"
-    assert statuses[1] == "torch_global_deps.dll=missing"
-    assert statuses[2].startswith("c10.dll=failed:1114:")
+    assert app_paths.register_windows_dll_directory(dll_dir) is True
+    assert app_paths.register_windows_dll_directory(dll_dir) is True
+    assert calls == [str(dll_dir.resolve())]
+    assert app_paths._WINDOWS_DLL_DIRECTORY_HANDLES == handles

@@ -283,6 +283,15 @@ echo Checking GPU acceleration support...
 python -c "from torch_runtime import get_torch; from youtube_transcriber import get_whisper_cuda_status; torch = get_torch(context='run_gui:gpu_check'); fw_ok, fw_name = get_whisper_cuda_status(); print('[OK] PyTorch with CUDA:', bool(torch and torch.cuda.is_available())); print('[OK] faster-whisper CUDA backend:', fw_ok, fw_name if fw_name else '')" 2>nul || echo [INFO] GPU check failed - application will auto-fallback to CPU mode
 echo.
 
+set "GUI_LOG_PATH="
+set "CORE_LOG_PATH="
+set "CONFIG_PATH="
+set "CACHE_ROOT="
+for /f "usebackq delims=" %%L in (`python -c "from app_paths import get_log_path; print(get_log_path('gui_transcriber.log'))" 2^>nul`) do set "GUI_LOG_PATH=%%L"
+for /f "usebackq delims=" %%L in (`python -c "from app_paths import get_log_path; print(get_log_path('youtube_transcriber.log'))" 2^>nul`) do set "CORE_LOG_PATH=%%L"
+for /f "usebackq delims=" %%L in (`python -c "from app_paths import get_config_path; print(get_config_path())" 2^>nul`) do set "CONFIG_PATH=%%L"
+for /f "usebackq delims=" %%L in (`python -c "from app_paths import get_model_cache_root; print(get_model_cache_root())" 2^>nul`) do set "CACHE_ROOT=%%L"
+
 REM ============================================
 REM Launch Application
 REM ============================================
@@ -290,9 +299,11 @@ echo ========================================
 echo   Launching YouTube Transcriber GUI
 echo ========================================
 echo.
-echo Logs will be saved to:
-echo   - gui_transcriber.log
-echo   - youtube_transcriber.log
+echo Runtime paths:
+if defined GUI_LOG_PATH echo   GUI log: !GUI_LOG_PATH!
+if defined CORE_LOG_PATH echo   Core log: !CORE_LOG_PATH!
+if defined CONFIG_PATH echo   Config: !CONFIG_PATH!
+if defined CACHE_ROOT echo   Model cache: !CACHE_ROOT!
 echo.
 
 python gui_transcriber.py
@@ -306,9 +317,9 @@ if errorlevel 1 (
     echo [ERROR] Application crashed
     echo ========================================
     echo.
-    echo Please check the log files for details:
-    echo   - gui_transcriber.log
-    echo   - youtube_transcriber.log
+    echo Please check the runtime paths for details:
+    if defined GUI_LOG_PATH echo   GUI log: !GUI_LOG_PATH!
+    if defined CORE_LOG_PATH echo   Core log: !CORE_LOG_PATH!
     echo.
     echo Common issues:
     echo   - Missing dependencies: Delete 'venv' folder and run again

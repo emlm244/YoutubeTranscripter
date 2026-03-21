@@ -8,12 +8,12 @@ from __future__ import annotations
 
 import argparse
 import array
+from collections.abc import Callable, Iterable
 import glob
 import json
 import logging
 import math
 import os
-import platform
 import re
 import shutil
 import subprocess
@@ -26,7 +26,7 @@ from pathlib import Path
 from typing import Any, Literal, Optional, overload
 
 import runtime_bootstrap  # noqa: F401
-from app_paths import get_ffmpeg_search_roots, get_log_path
+from app_paths import get_ffmpeg_search_roots, get_log_path, register_windows_dll_directory
 from torch_runtime import get_torch
 
 from audio_preprocessor import preprocess_file
@@ -57,7 +57,7 @@ logger = logging.getLogger(__name__)
 
 def _ctranslate2_cuda_supported(*, verbose: bool = False) -> bool:
     """Check whether faster-whisper's CTranslate2 backend can use CUDA."""
-    if platform.system() == "Windows" and not ensure_cuda12_runtime_on_windows():
+    if sys.platform == "win32" and not ensure_cuda12_runtime_on_windows():
         if verbose:
             logger.warning("CUDA 12 runtime not found (cublas64_12.dll).")
         return False
@@ -135,7 +135,7 @@ def ensure_cuda12_runtime_on_windows() -> bool:
     Returns:
         True when ``cublas64_12.dll`` can be loaded, False otherwise.
     """
-    if platform.system() != "Windows":
+    if sys.platform != "win32":
         return True
 
     try:
@@ -190,12 +190,11 @@ def ensure_cuda12_runtime_on_windows() -> bool:
         if not directory.is_dir():
             continue
         directory_str = str(directory)
-        try:
-            add_dll_directory(directory_str)
-        except OSError:
+        if not register_windows_dll_directory(directory_str):
             continue
         if directory_str not in path_entries:
-            os.environ["PATH"] = directory_str + os.pathsep + os.environ.get("PATH", "")
+            _prepend_directory_to_path_once(directory_str)
+            path_entries.insert(0, directory_str)
 
         if _can_load():
             logger.info(f"Loaded CUDA runtime from: {directory_str}")
@@ -263,6 +262,31 @@ VIDEO_EXTENSIONS: set[str] = {".mkv", ".mp4", ".avi", ".mov", ".wmv", ".flv", ".
 # FFmpeg path cache (avoids slow recursive directory walk on each call)
 _cached_ffmpeg_path: Optional[str] = None
 _ffmpeg_cache_checked = False
+_VIDEO_ID_RE = re.compile(r"^[0-9A-Za-z_-]{11}$")
+_WINDOWS_RESERVED_BASENAMES = {
+    "CON",
+    "PRN",
+    "AUX",
+    "NUL",
+    "COM1",
+    "COM2",
+    "COM3",
+    "COM4",
+    "COM5",
+    "COM6",
+    "COM7",
+    "COM8",
+    "COM9",
+    "LPT1",
+    "LPT2",
+    "LPT3",
+    "LPT4",
+    "LPT5",
+    "LPT6",
+    "LPT7",
+    "LPT8",
+    "LPT9",
+}
 
 
 def _gpu_memory_fraction() -> float:
@@ -275,6 +299,32 @@ def _max_audio_size_mb() -> int:
 
 def _max_filename_length() -> int:
     return get_config().max_filename_length
+
+
+def _prepend_directory_to_path_once(directory: str) -> None:
+    """Prepend a directory to PATH without duplicating it."""
+    current_path = os.environ.get("PATH", "")
+    path_entries = current_path.split(os.pathsep) if current_path else []
+    normalized_entries = {os.path.normcase(entry) for entry in path_entries}
+    if os.path.normcase(directory) in normalized_entries:
+        return
+    os.environ["PATH"] = directory + os.pathsep + current_path if current_path else directory
+
+
+def _truncate_filename(filename: str, *, max_length: int) -> str:
+    """Truncate a filename while preserving its extension when practical."""
+    if len(filename) <= max_length:
+        return filename
+
+    path = Path(filename)
+    suffix = "".join(path.suffixes)
+    if suffix and len(suffix) < max_length:
+        stem = filename[: -len(suffix)]
+        truncated_stem = stem[: max_length - len(suffix)].rstrip(" .")
+        if truncated_stem:
+            return f"{truncated_stem}{suffix}"
+
+    return filename[:max_length].rstrip(" .")
 
 
 def sanitize_filename(filename: str, max_length: int | None = None) -> str:
@@ -296,17 +346,20 @@ def sanitize_filename(filename: str, max_length: int | None = None) -> str:
     # Remove traversal attempts
     filename = filename.replace("..", "")
 
-    if platform.system() == "Windows":
+    if sys.platform == "win32":
         # Windows reserved characters
         filename = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "", filename)
-        # Windows reserved names (complete list)
-        reserved = [
-            "CON", "PRN", "AUX", "NUL",
-            "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9",
-            "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
-        ]
-        if filename.upper() in reserved:
-            filename = f"_{filename}"
+        filename = filename.strip().rstrip(" .")
+
+        path = Path(filename)
+        suffix = "".join(path.suffixes)
+        stem = filename[: -len(suffix)] if suffix else filename
+        stem = stem.rstrip(" .")
+        if stem.upper() in _WINDOWS_RESERVED_BASENAMES:
+            stem = f"_{stem}"
+        if not stem:
+            stem = "untitled_video"
+        filename = f"{stem}{suffix}"
     else:
         # Unix-like systems (remove / and null)
         filename = re.sub(r"[/\x00]", "", filename)
@@ -316,12 +369,22 @@ def sanitize_filename(filename: str, max_length: int | None = None) -> str:
         filename = "untitled_video"
 
     # Limit length
-    return filename[:max_length].strip()
+    return _truncate_filename(filename, max_length=max_length).strip().rstrip(" .") or "untitled_video"
 
 
 def _normalise_host(netloc: str) -> str:
     """Extract hostname portion without port."""
     return netloc.split(":")[0].lower()
+
+
+def _coerce_video_id(candidate: str | None) -> Optional[str]:
+    """Return a normalized YouTube video ID when the candidate is valid."""
+    if candidate is None:
+        return None
+    stripped = candidate.strip()
+    if _VIDEO_ID_RE.fullmatch(stripped):
+        return stripped
+    return None
 
 
 def validate_youtube_url(url: str) -> tuple[bool, str | None]:
@@ -333,32 +396,36 @@ def validate_youtube_url(url: str) -> tuple[bool, str | None]:
     Returns:
         Tuple of (is_valid, error_message)
     """
+    if not isinstance(url, str) or not url.strip():
+        return False, "URL is empty"
+
     try:
-        parsed = urllib.parse.urlparse(url)
-        host = _normalise_host(parsed.netloc)
-
-        allowed_hosts = {
-            "youtube.com",
-            "youtube-nocookie.com",
-            "youtu.be",
-        }
-
-        if not (
-            host in allowed_hosts
-            or host.endswith(".youtube.com")
-            or host.endswith(".youtube-nocookie.com")
-        ):
-            return False, f"Invalid domain: {parsed.netloc}. Expected a YouTube URL."
-
-        # Check for video ID
-        if host == "youtu.be":
-            return True, None
-        elif "v=" in parsed.query or "/watch" in parsed.path or "/shorts/" in parsed.path:
-            return True, None
-        else:
-            return False, "No video ID found in URL"
+        parsed = urllib.parse.urlparse(url.strip())
     except Exception as e:
         return False, f"Invalid URL format: {e}"
+
+    if parsed.scheme not in {"http", "https"}:
+        return False, "URL must start with http:// or https://"
+
+    host = _normalise_host(parsed.netloc)
+    if not host:
+        return False, "URL is missing a hostname"
+
+    allowed_hosts = {
+        "youtube.com",
+        "youtube-nocookie.com",
+        "youtu.be",
+    }
+    if not (
+        host in allowed_hosts
+        or host.endswith(".youtube.com")
+        or host.endswith(".youtube-nocookie.com")
+    ):
+        return False, f"Invalid domain: {parsed.netloc}. Expected a YouTube URL."
+
+    if extract_video_id(url) is None:
+        return False, "No valid video ID found in URL"
+    return True, None
 
 
 def check_dependencies() -> tuple[bool, list[str]]:
@@ -494,7 +561,7 @@ def find_ffmpeg() -> Optional[str]:
 
 def _ffmpeg_executable(name: str, ffmpeg_location: Optional[str]) -> str:
     """Resolve an FFmpeg companion executable (ffmpeg/ffprobe) across platforms."""
-    if platform.system() == "Windows" and ffmpeg_location:
+    if sys.platform == "win32" and ffmpeg_location:
         candidate = Path(ffmpeg_location) / f"{name}.exe"
         if candidate.exists():
             return str(candidate)
@@ -819,17 +886,35 @@ def extract_video_id(url: str) -> Optional[str]:
     Returns:
         Video ID string or None if not found
     """
-    patterns = [
-        r"(?:v=|\/)([0-9A-Za-z_-]{11}).*",
-        r"(?:embed\/)([0-9A-Za-z_-]{11})",
-        r"(?:shorts\/)([0-9A-Za-z_-]{11})",  # YouTube Shorts format
-        r"^([0-9A-Za-z_-]{11})$",
-    ]
+    stripped = url.strip()
+    direct_video_id = _coerce_video_id(stripped)
+    if direct_video_id is not None:
+        return direct_video_id
 
-    for pattern in patterns:
-        match = re.search(pattern, url)
-        if match:
-            return match.group(1)
+    try:
+        parsed = urllib.parse.urlparse(stripped)
+    except Exception:
+        return None
+
+    host = _normalise_host(parsed.netloc)
+    path_parts = [part for part in parsed.path.split("/") if part]
+
+    if host == "youtu.be":
+        if not path_parts:
+            return None
+        return _coerce_video_id(path_parts[0])
+
+    if host in {"youtube.com", "youtube-nocookie.com"} or host.endswith(".youtube.com") or host.endswith(".youtube-nocookie.com"):
+        query = urllib.parse.parse_qs(parsed.query)
+        for key in ("v", "vi"):
+            candidate_values = query.get(key)
+            if candidate_values:
+                video_id = _coerce_video_id(candidate_values[0])
+                if video_id is not None:
+                    return video_id
+
+        if len(path_parts) >= 2 and path_parts[0] in {"embed", "shorts", "live", "v"}:
+            return _coerce_video_id(path_parts[1])
 
     return None
 
@@ -1263,7 +1348,9 @@ def download_audio(
         ffmpeg_location: Path to FFmpeg directory
 
     Returns:
-        Path to downloaded audio file or None on error
+        Path to downloaded audio file or None on error.
+        This helper intentionally preserves its legacy best-effort contract for
+        YouTube fallback callers instead of raising on every failure.
 
     Raises:
         RuntimeError: If disk space is insufficient or file is too large
@@ -1515,6 +1602,208 @@ def _setup_device_and_compute_type(*, verbose: bool = True) -> tuple[str, str]:
     return device, compute_type
 
 
+def _ensure_ffmpeg_on_path(ffmpeg_location: Optional[str], *, context: str) -> None:
+    """Prepend an FFmpeg directory to PATH once for subprocess-based backends."""
+    if not ffmpeg_location:
+        return
+
+    current_path = os.environ.get("PATH", "")
+    path_entries = current_path.split(os.pathsep) if current_path else []
+    normalized_entries = {os.path.normcase(entry) for entry in path_entries}
+    if os.path.normcase(ffmpeg_location) in normalized_entries:
+        return
+
+    os.environ["PATH"] = ffmpeg_location + os.pathsep + current_path if current_path else ffmpeg_location
+    logger.info("Added FFmpeg to PATH for %s: %s", context, ffmpeg_location)
+
+
+def _build_whisper_pipeline(
+    model_name: str,
+    *,
+    device: str,
+    compute_type: str,
+) -> tuple[Any, Any]:
+    """Build a faster-whisper model plus batched inference pipeline."""
+    from faster_whisper import BatchedInferencePipeline, WhisperModel
+
+    base_model = WhisperModel(
+        model_name,
+        device=device,
+        compute_type=compute_type,
+        download_root=None,
+        num_workers=4 if device == "cpu" else 1,
+    )
+    return base_model, BatchedInferencePipeline(model=base_model)
+
+
+def _load_whisper_pipeline_with_fallback(
+    model_name: str,
+    *,
+    device: str,
+    compute_type: str,
+) -> tuple[Any, Any, str, str]:
+    """Build the preferred pipeline and retry on CPU when CUDA libraries are unavailable."""
+    try:
+        base_model, pipeline = _build_whisper_pipeline(
+            model_name,
+            device=device,
+            compute_type=compute_type,
+        )
+    except Exception as exc:
+        if device == "cuda" and _needs_cuda_cpu_fallback(exc):
+            logger.warning("CUDA libraries not available (e.g., cublas). Falling back to CPU.")
+            device = "cpu"
+            compute_type = "int8"
+            base_model, pipeline = _build_whisper_pipeline(
+                model_name,
+                device=device,
+                compute_type=compute_type,
+            )
+        else:
+            raise
+
+    return base_model, pipeline, device, compute_type
+
+
+@dataclass
+class _WhisperExecutionState:
+    """Mutable faster-whisper execution state shared across retry attempts."""
+
+    model_name: str
+    base_model: Any
+    pipeline: Any
+    device: str
+    compute_type: str
+
+
+def _initialize_whisper_execution(
+    model_name: str,
+    *,
+    ffmpeg_location: Optional[str],
+    ffmpeg_context: str,
+    verbose: bool,
+    load_message: str,
+    optimized_message: str | None = None,
+) -> _WhisperExecutionState:
+    """Create shared faster-whisper execution state for a transcription flow."""
+    _ensure_ffmpeg_on_path(ffmpeg_location, context=ffmpeg_context)
+    device, compute_type = _setup_device_and_compute_type(verbose=verbose)
+
+    logger.info(load_message)
+    if optimized_message:
+        logger.info(optimized_message)
+
+    base_model, pipeline, device, compute_type = _load_whisper_pipeline_with_fallback(
+        model_name,
+        device=device,
+        compute_type=compute_type,
+    )
+
+    logger.info(f"Transcribing on {device.upper()} with {compute_type}...")
+    logger.info("-" * 50)
+    return _WhisperExecutionState(
+        model_name=model_name,
+        base_model=base_model,
+        pipeline=pipeline,
+        device=device,
+        compute_type=compute_type,
+    )
+
+
+def _log_whisper_info(info: Any) -> None:
+    """Log the shared metadata emitted by faster-whisper after a run."""
+    logger.info(f"Audio duration: {info.duration/60:.1f} minutes")
+    logger.info(
+        f"Language detected: {info.language} (probability: {info.language_probability:.2f})"
+    )
+    logger.info("-" * 50)
+
+
+def _collect_logged_segments(
+    segments: Iterable[Any],
+    *,
+    segment_observer: Callable[[Any, Any], None] | None = None,
+    info: Any | None = None,
+) -> TranscriptSegments:
+    """Convert faster-whisper segments into transcript segments with consistent logging."""
+    collected: TranscriptSegments = []
+    for segment in segments:
+        if segment_observer is not None and info is not None:
+            segment_observer(segment, info)
+
+        timestamp = f"[{segment.start/60:05.1f}m -> {segment.end/60:05.1f}m]"
+        logger.info(f"{timestamp} {segment.text.strip()}")
+        collected.append(
+            make_transcript_segment(
+                start=segment.start,
+                end=segment.end,
+                text=segment.text,
+            )
+        )
+    return collected
+
+
+def _run_whisper_transcription(
+    state: _WhisperExecutionState,
+    input_source: Any,
+    *,
+    kwargs: dict[str, Any],
+    cpu_recovery_overrides: dict[str, Any] | None = None,
+    before_retry: Callable[[], None] | None = None,
+    pass_name: str | None = None,
+    segment_observer: Callable[[Any, Any], None] | None = None,
+) -> tuple[TranscriptSegments, Any, _WhisperExecutionState]:
+    """Run faster-whisper using shared execution state with CPU fallback when needed."""
+    if pass_name:
+        clip_val = kwargs.get("clip_timestamps")
+        clip_count = len(clip_val) if isinstance(clip_val, list) else None
+        logger.info(
+            "Transcription attempt: %s (vad_filter=%s, no_speech_threshold=%s, clip_timestamps=%s)",
+            pass_name,
+            kwargs.get("vad_filter"),
+            kwargs.get("no_speech_threshold"),
+            clip_count,
+        )
+
+    active_kwargs = dict(kwargs)
+    try:
+        segments, info = state.pipeline.transcribe(input_source, **active_kwargs)
+    except Exception as exc:
+        if state.device == "cuda" and _needs_cuda_cpu_fallback(exc):
+            if before_retry is not None:
+                before_retry()
+
+            if cpu_recovery_overrides:
+                logger.warning("GPU issue detected (OOM or missing CUDA libs). Falling back to CPU with INT8 quantization.")
+            else:
+                logger.warning("CUDA runtime error detected; retrying transcription on CPU.")
+
+            state.device = "cpu"
+            state.compute_type = "int8"
+            state.base_model, state.pipeline = _build_whisper_pipeline(
+                state.model_name,
+                device=state.device,
+                compute_type=state.compute_type,
+            )
+            logger.info(f"Transcribing on {state.device.upper()} with {state.compute_type}...")
+
+            if cpu_recovery_overrides:
+                active_kwargs.update(cpu_recovery_overrides)
+            segments, info = state.pipeline.transcribe(input_source, **active_kwargs)
+            if cpu_recovery_overrides:
+                logger.info("Recovery successful with CPU INT8 fallback")
+        else:
+            raise
+
+    _log_whisper_info(info)
+    segments_data = _collect_logged_segments(
+        segments,
+        segment_observer=segment_observer,
+        info=info,
+    )
+    return segments_data, info, state
+
+
 def transcribe_audio(
     audio_file: str,
     ffmpeg_location: Optional[str] = None,
@@ -1531,63 +1820,34 @@ def transcribe_audio(
 
     Returns:
         Tuple of (transcript_text, segments_data). Returns (None, None) on error.
+        This best-effort contract is intentionally preserved for existing
+        YouTube fallback callers; local-file transcription uses typed exceptions.
     """
     if config is None:
         config = get_config().transcription
 
     torch_module = get_torch(context="youtube_transcriber:transcribe_audio")
     device = "cpu"
-    compute_type = "int8"
     audio_duration = 0.0
     segment_count = 0
-    base_model: Any = None
-    model: Any = None
+    execution_state: _WhisperExecutionState | None = None
     _preprocess_temp: str | None = None
 
     try:
         import time
 
-        if ffmpeg_location:
-            current_path = os.environ.get("PATH", "")
-            path_entries = current_path.split(os.pathsep) if current_path else []
-            if ffmpeg_location not in path_entries:
-                os.environ["PATH"] = ffmpeg_location + os.pathsep + current_path
-                logger.info(f"Added FFmpeg to PATH for Whisper: {ffmpeg_location}")
-
-        from faster_whisper import BatchedInferencePipeline, WhisperModel
-
-        def _build_pipeline(current_device: str, current_compute_type: str) -> tuple[Any, Any]:
-            base_model = WhisperModel(
-                config.whisper_model,
-                device=current_device,
-                compute_type=current_compute_type,
-                download_root=None,
-                num_workers=4 if current_device == "cpu" else 1,
-            )
-            return base_model, BatchedInferencePipeline(model=base_model)
-
-        device, compute_type = _setup_device_and_compute_type(verbose=True)
-
-        logger.info(
-            f"Loading faster-whisper '{config.whisper_model}' model (best accuracy, ~3GB download on first run)..."
+        execution_state = _initialize_whisper_execution(
+            config.whisper_model,
+            ffmpeg_location=ffmpeg_location,
+            ffmpeg_context="Whisper",
+            verbose=True,
+            load_message=(
+                f"Loading faster-whisper '{config.whisper_model}' model "
+                "(best accuracy, ~3GB download on first run)..."
+            ),
+            optimized_message="Using optimized CTranslate2 backend with batch processing for 2-4x speedup...",
         )
-        logger.info(
-            "Using optimized CTranslate2 backend with batch processing for 2-4x speedup..."
-        )
-
-        try:
-            base_model, model = _build_pipeline(device, compute_type)
-        except Exception as exc:
-            if device == "cuda" and _needs_cuda_cpu_fallback(exc):
-                logger.warning("CUDA libraries not available (e.g., cublas). Falling back to CPU.")
-                device = "cpu"
-                compute_type = "int8"
-                base_model, model = _build_pipeline(device, compute_type)
-            else:
-                raise
-
-        logger.info(f"Transcribing on {device.upper()} with {compute_type}...")
-        logger.info("-" * 50)
+        device = execution_state.device
 
         preprocessed_audio_file = audio_file
         if config.noise_reduction_enabled or config.normalize_audio:
@@ -1616,52 +1876,21 @@ def transcribe_audio(
         start_time = time.time()
         transcribe_kwargs = _build_transcribe_kwargs(config)
 
-        try:
-            segments, info = model.transcribe(preprocessed_audio_file, **transcribe_kwargs)
-        except RuntimeError as e:
-            if device == "cuda" and _needs_cuda_cpu_fallback(e):
-                logger.warning("GPU issue detected (OOM or missing CUDA libs). Falling back to CPU with INT8 quantization.")
-                if torch_module is not None and torch_module.cuda.is_available():
-                    torch_module.cuda.empty_cache()
-                device = "cpu"
-                compute_type = "int8"
-                base_model, model = _build_pipeline(device, compute_type)
-
-                recovery_kwargs = _build_transcribe_kwargs(config)
-                recovery_kwargs.update(
-                    beam_size=1,
-                    best_of=1,
-                    batch_size=8,
-                )
-                segments, info = model.transcribe(preprocessed_audio_file, **recovery_kwargs)
-                logger.info("Recovery successful with CPU INT8 fallback")
-            else:
-                raise
-
-        audio_duration = info.duration
-        logger.info(f"Audio duration: {audio_duration/60:.1f} minutes")
-        logger.info(
-            f"Language detected: {info.language} (probability: {info.language_probability:.2f})"
-        )
-        logger.info("-" * 50)
-
-        segments_data: TranscriptSegments = []
         last_print_time = start_time
 
-        for segment in segments:
+        def _observe_segment(segment: Any, info: Any) -> None:
+            nonlocal last_print_time
             current_time = time.time()
+            audio_duration_local = info.duration
             if current_time - last_print_time >= PROGRESS_DISPLAY_INTERVAL_S:
                 elapsed = current_time - start_time
-                progress = ((segment.end / audio_duration) * 100) if audio_duration > 0 else 0
+                progress = ((segment.end / audio_duration_local) * 100) if audio_duration_local > 0 else 0
                 logger.info(
                     f"Progress: {progress:.1f}% | "
                     f"[{segment.start/60:.1f}m - {segment.end/60:.1f}m] | "
                     f"Speed: {segment.end/elapsed:.1f}x real-time"
                 )
                 last_print_time = current_time
-
-            timestamp = f"[{segment.start/60:05.1f}m -> {segment.end/60:05.1f}m]"
-            logger.info(f"{timestamp} {segment.text.strip()}")
 
             if config.word_timestamps and hasattr(segment, "words") and segment.words:
                 for word in segment.words:
@@ -1673,13 +1902,24 @@ def transcribe_audio(
                             word.start,
                         )
 
-            segments_data.append(
-                make_transcript_segment(
-                    start=segment.start,
-                    end=segment.end,
-                    text=segment.text,
-                )
-            )
+        segments_data, info, execution_state = _run_whisper_transcription(
+            execution_state,
+            preprocessed_audio_file,
+            kwargs=transcribe_kwargs,
+            cpu_recovery_overrides={
+                "beam_size": 1,
+                "best_of": 1,
+                "batch_size": 8,
+            },
+            before_retry=(
+                lambda: torch_module.cuda.empty_cache()
+                if torch_module is not None and torch_module.cuda.is_available()
+                else None
+            ),
+            segment_observer=_observe_segment,
+        )
+        device = execution_state.device
+        audio_duration = info.duration
 
         full_transcript, segments_data, removed_count, _ = _normalize_transcript_segments(
             segments_data,
@@ -1715,7 +1955,9 @@ def transcribe_audio(
         return None, None
     finally:
         try:
-            model = None
+            if execution_state is not None:
+                execution_state.pipeline = None
+                execution_state.base_model = None
             if device == "cuda" and torch_module is not None and torch_module.cuda.is_available():
                 torch_module.cuda.empty_cache()
                 allocated_mb = torch_module.cuda.memory_allocated() / (1024 * 1024)
@@ -1764,8 +2006,9 @@ def transcribe_local_file(
     if config is None:
         config = get_config().transcription
     file_ext = os.path.splitext(file_path)[1].lower()
+    torch_module = get_torch(context="youtube_transcriber:transcribe_local_file")
 
-    if get_torch(context="youtube_transcriber:transcribe_local_file") is None:
+    if torch_module is None:
         logger.warning("torch is unavailable; continuing with non-torch transcription path")
 
     # Validate file exists
@@ -1794,6 +2037,7 @@ def transcribe_local_file(
     ranked_audio_streams: list[AudioStreamCandidate] = []
     selected_audio_index: int | None = None
     best_stream_low_energy = False
+    execution_state: _WhisperExecutionState | None = None
 
     def _create_temp_wav(
         *,
@@ -1823,14 +2067,6 @@ def transcribe_local_file(
         return temp_audio_path
 
     try:
-        # Add FFmpeg to PATH if found
-        if ffmpeg_location:
-            current_path = os.environ.get("PATH", "")
-            path_entries = current_path.split(os.pathsep) if current_path else []
-            if ffmpeg_location not in path_entries:
-                os.environ["PATH"] = ffmpeg_location + os.pathsep + current_path
-                logger.info(f"Added FFmpeg to PATH: {ffmpeg_location}")
-
         # For video containers, proactively extract the most "active" audio stream to WAV.
         if file_ext in VIDEO_EXTENSIONS:
             ranked_audio_streams = _rank_audio_streams_for_transcription(file_path, ffmpeg_location)
@@ -1857,40 +2093,13 @@ def transcribe_local_file(
             else:
                 logger.warning("Audio extraction failed; transcribing original video file directly.")
 
-        # Setup device and compute type with automatic GPU fallback
-        device, compute_type = _setup_device_and_compute_type(verbose=True)
-
-        from faster_whisper import BatchedInferencePipeline, WhisperModel
-
-        # Load Whisper model
-        logger.info(f"Loading faster-whisper '{config.whisper_model}' model...")
-        try:
-            base_model = WhisperModel(
-                config.whisper_model,  # Use configured model
-                device=device,
-                compute_type=compute_type,
-                download_root=None,
-                num_workers=4 if device == "cpu" else 1,
-            )
-        except Exception as exc:
-            if device == "cuda" and _needs_cuda_cpu_fallback(exc):
-                logger.warning("CUDA libraries not available (e.g., cublas). Falling back to CPU.")
-                device = "cpu"
-                compute_type = "int8"
-                base_model = WhisperModel(
-                    config.whisper_model,
-                    device=device,
-                    compute_type=compute_type,
-                    download_root=None,
-                    num_workers=4,
-                )
-            else:
-                raise
-        model = BatchedInferencePipeline(model=base_model)
-
-        # Transcribe the file
-        logger.info(f"Transcribing on {device.upper()} with {compute_type}...")
-        logger.info("-" * 50)
+        execution_state = _initialize_whisper_execution(
+            config.whisper_model,
+            ffmpeg_location=ffmpeg_location,
+            ffmpeg_context="local transcription",
+            verbose=True,
+            load_message=f"Loading faster-whisper '{config.whisper_model}' model...",
+        )
 
         # Build transcription kwargs from config (centralized parameters)
         transcribe_kwargs = _build_transcribe_kwargs(config)
@@ -1960,60 +2169,19 @@ def transcribe_local_file(
 
             return False
 
-        def _collect_segments(segments: Any) -> TranscriptSegments:
-            collected: TranscriptSegments = []
-            for segment in segments:
-                timestamp = f"[{segment.start/60:05.1f}m -> {segment.end/60:05.1f}m]"
-                logger.info(f"{timestamp} {segment.text.strip()}")
-                collected.append(
-                    make_transcript_segment(
-                        start=segment.start,
-                        end=segment.end,
-                        text=segment.text,
-                    )
-                )
-            return collected
-
         def _transcribe_with_cuda_fallback(
             pass_name: str, *, kwargs: dict[str, Any]
         ) -> tuple[TranscriptSegments, Any]:
-            nonlocal device, compute_type, base_model, model
+            nonlocal execution_state
             _ensure_clip_timestamps_for_long_audio(kwargs)
-            clip_val = kwargs.get("clip_timestamps")
-            clip_count = len(clip_val) if isinstance(clip_val, list) else None
-            logger.info(
-                "Transcription attempt: %s (vad_filter=%s, no_speech_threshold=%s, clip_timestamps=%s)",
-                pass_name,
-                kwargs.get("vad_filter"),
-                kwargs.get("no_speech_threshold"),
-                clip_count,
+            assert execution_state is not None
+            segments_data, info, execution_state = _run_whisper_transcription(
+                execution_state,
+                transcription_input_path,
+                kwargs=kwargs,
+                pass_name=pass_name,
             )
-            try:
-                segments, info = model.transcribe(transcription_input_path, **kwargs)
-            except Exception as exc:
-                if device == "cuda" and _needs_cuda_cpu_fallback(exc):
-                    logger.warning("CUDA runtime error detected; retrying transcription on CPU.")
-                    device = "cpu"
-                    compute_type = "int8"
-                    base_model = WhisperModel(
-                        config.whisper_model,
-                        device=device,
-                        compute_type=compute_type,
-                        download_root=None,
-                        num_workers=4,
-                    )
-                    model = BatchedInferencePipeline(model=base_model)
-                    logger.info(f"Transcribing on {device.upper()} with {compute_type}...")
-                    segments, info = model.transcribe(transcription_input_path, **kwargs)
-                else:
-                    raise
-
-            logger.info(f"Audio duration: {info.duration/60:.1f} minutes")
-            logger.info(
-                f"Language detected: {info.language} (probability: {info.language_probability:.2f})"
-            )
-            logger.info("-" * 50)
-            return _collect_segments(segments), info
+            return segments_data, info
 
         def _try_transcribe(pass_name: str, kwargs: dict[str, Any]) -> TranscriptSegments:
             """Attempt transcription and return segments (empty if suspicious)."""

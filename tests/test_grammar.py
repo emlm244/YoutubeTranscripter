@@ -5,6 +5,8 @@ from __future__ import annotations
 import sys
 import types
 
+import pytest
+
 import grammar_postprocessor as gp
 
 from config import GrammarConfig
@@ -61,10 +63,24 @@ class TestPostProcessGrammar:
 class TestCheckGrammarStatus:
     """Test check_grammar_status function."""
 
-    def test_returns_tuple(self):
+    @pytest.fixture(autouse=True)
+    def _reset_runtime_state(self, monkeypatch):
+        monkeypatch.setattr(gp, "_lt_instances", {})
+        monkeypatch.setattr(gp._GECToRManager, "_instance", None)
+
+    def test_returns_tuple_for_eager_status(self, monkeypatch):
+        monkeypatch.setattr(gp.GrammarPostProcessor, "get_status", lambda self: "LanguageTool")
         available, status = check_grammar_status()
+        assert available is True
+        assert status == "LanguageTool"
         assert isinstance(available, bool)
         assert isinstance(status, str)
+
+    def test_lazy_status_stays_hermetic(self, monkeypatch):
+        monkeypatch.setattr(gp.GrammarPostProcessor, "peek_status", lambda self: "GECToR (downloads model on demand)")
+        available, status = check_grammar_status(lazy=True)
+        assert available is True
+        assert status == "GECToR (downloads model on demand)"
 
 
 class TestGrammarRegressions:

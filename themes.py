@@ -93,18 +93,6 @@ class ThemeColors:
     glow_warning: str = "rgba(235, 203, 139, 0.2)"
     glow_error: str = "rgba(191, 97, 106, 0.2)"
 
-    # Loading/skeleton
-    skeleton_base: str = "#3B4252"
-    skeleton_shimmer: str = "#434C5E"
-    skeleton_highlight: str = "#4C566A"
-
-    # Animation timing (in ms)
-    anim_fast: int = 100
-    anim_normal: int = 200
-    anim_slow: int = 300
-    anim_stagger: int = 50
-
-
 # Pre-defined themes
 DARK_THEME = ThemeColors()
 
@@ -467,44 +455,6 @@ class ThemeManager:
             return f"color: {self.colors.recording}; font-size: 10pt; font-weight: 600;"
         return f"color: {self.colors.text_disabled}; font-size: 10pt;"
 
-    def get_glass_card_style(self, is_hovered: bool = False) -> str:
-        """Get card stylesheet (simplified, no glass effect).
-
-        Args:
-            is_hovered: Whether card is in hover state.
-
-        Returns:
-            QSS stylesheet for card.
-        """
-        c = self.colors
-        bg = c.surface_variant if is_hovered else c.surface
-
-        return f"""
-            GlassCard {{
-                background-color: {bg};
-                border: 1px solid {c.border};
-                border-radius: 8px;
-            }}
-        """
-
-    def get_glow_color(self, variant: str) -> str:
-        """Get glow color for a variant.
-
-        Args:
-            variant: Button/card variant.
-
-        Returns:
-            RGBA color string for glow effect.
-        """
-        c = self.colors
-        glows = {
-            "primary": c.glow_primary,
-            "success": c.glow_success,
-            "warning": c.glow_warning,
-            "error": c.glow_error,
-        }
-        return glows.get(variant, c.glow_primary)
-
 
 # Global theme manager instance
 _theme_manager: Optional[ThemeManager] = None
@@ -516,9 +466,3 @@ def get_theme_manager() -> ThemeManager:
     if _theme_manager is None:
         _theme_manager = ThemeManager(DARK_THEME)
     return _theme_manager
-
-
-def set_theme(theme: ThemeColors) -> None:
-    """Set a new theme globally."""
-    global _theme_manager
-    _theme_manager = ThemeManager(theme)

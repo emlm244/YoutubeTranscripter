@@ -15,8 +15,12 @@ from gui_transcriber import (
     QueueLogger,
     QueueHandler,
     TranscriberGUI,
+    _apply_optional_grammar_corrections,
     _attach_worker_queue_logging,
+    _build_transcription_complete_status,
     _detach_worker_queue_logging,
+    _queue_transcript_snapshot,
+    _worker_queue_bridge,
 )
 from transcript_types import make_transcript_segment
 
@@ -94,6 +98,28 @@ def test_worker_queue_logging_temporarily_enables_backend_info_logs() -> None:
         assert logger_obj.level == original_levels[logger_name]
 
 
+def test_worker_queue_bridge_flushes_stdout_and_restores_logging(monkeypatch) -> None:
+    """The shared worker bridge should always restore stdout and detach logging state."""
+    target_queue: queue.Queue[tuple[object, ...]] = queue.Queue()
+    detach_calls: list[tuple[object, object]] = []
+
+    monkeypatch.setattr(gt, "_attach_worker_queue_logging", lambda target: ("handler", ["state"]))
+    monkeypatch.setattr(
+        gt,
+        "_detach_worker_queue_logging",
+        lambda handler, states: detach_calls.append((handler, states)),
+    )
+
+    original_stdout = gt.sys.stdout
+    with _worker_queue_bridge(target_queue):
+        print("bridged output", end="")
+
+    assert gt.sys.stdout is original_stdout
+    assert detach_calls == [("handler", ["state"])]
+    assert target_queue.get_nowait() == ("progress", "bridged output")
+    assert target_queue.empty()
+
+
 def test_queue_handler_terminates_each_log_record_with_newline() -> None:
     """Logger records should remain visually separated in the GUI progress pane."""
     target_queue: queue.Queue[tuple[object, ...]] = queue.Queue()
@@ -167,6 +193,92 @@ def test_setup_backend_logging_for_gui_reuses_one_file_handler(monkeypatch, tmp_
             handlers, level = original_logger_state[logger_name]
             logger_obj.handlers[:] = handlers
             logger_obj.setLevel(level)
+
+
+def test_queue_transcript_snapshot_formats_timestamped_output() -> None:
+    """Shared snapshot helper should keep segment data and rendered text aligned."""
+    target_queue: queue.Queue[tuple[object, ...]] = queue.Queue()
+    segments = [make_transcript_segment(start=0.0, end=1.25, text="hello world")]
+
+    _queue_transcript_snapshot(
+        target_queue,
+        "hello world",
+        segments,
+        output_format="timestamped",
+    )
+
+    assert target_queue.get_nowait() == ("segments", segments)
+    assert target_queue.get_nowait() == (
+        "transcript",
+        gt.format_transcript_with_timestamps(segments),
+    )
+    assert target_queue.empty()
+
+
+def test_apply_optional_grammar_corrections_reports_success(monkeypatch) -> None:
+    """Grammar helper should centralize queue messages and return the processed snapshot."""
+    target_queue: queue.Queue[tuple[object, ...]] = queue.Queue()
+    raw_segments = [make_transcript_segment(start=0.0, end=1.0, text="raw text")]
+    processed_segments = [make_transcript_segment(start=0.0, end=1.0, text="fixed text")]
+
+    monkeypatch.setattr(
+        gt,
+        "post_process_grammar",
+        lambda **kwargs: ("fixed text", processed_segments, True),
+    )
+
+    result = _apply_optional_grammar_corrections(
+        target_queue,
+        "raw text",
+        raw_segments,
+        GrammarConfig(enabled=True),
+        warning_color="#f90",
+        start_status="Applying grammar corrections...",
+    )
+
+    assert result.completed is True
+    assert result.grammar_enhanced is True
+    assert result.transcript == "fixed text"
+    assert result.segments_data == processed_segments
+    assert _drain_queue(target_queue) == [
+        ("status", "Applying grammar corrections...", "#f90"),
+        ("progress", "Fixing grammar...\n"),
+        ("progress", "Grammar correction applied.\n"),
+    ]
+
+
+def test_build_transcription_complete_status_variants() -> None:
+    """Completion status helper should preserve the repo's existing wording."""
+    assert _build_transcription_complete_status(grammar_enhanced=False) == "Transcription complete!"
+    assert (
+        _build_transcription_complete_status(grammar_enhanced=True, segment_count=3)
+        == "Transcription complete! (3 segments) (grammar corrected)"
+    )
+    assert (
+        _build_transcription_complete_status(grammar_enhanced=True, word_count=42)
+        == "Transcription complete (42 words) - grammar corrected"
+    )
+
+
+def test_build_transcription_config_keeps_audio_cleanup_toggles_independent(monkeypatch) -> None:
+    """Noise reduction and normalization should remain independently configurable."""
+    fake_gui = cast(
+        Any,
+        SimpleNamespace(
+            config=SimpleNamespace(transcription=TranscriptionConfig()),
+            preset_combo=SimpleNamespace(currentData=lambda: gt.DEFAULT_PRESET),
+            hotwords_input=SimpleNamespace(text=lambda: ""),
+            filler_cleanup_checkbox=SimpleNamespace(isChecked=lambda: True),
+            noise_reduction_checkbox=SimpleNamespace(isChecked=lambda: False),
+            normalize_audio_checkbox=SimpleNamespace(isChecked=lambda: True),
+        ),
+    )
+    monkeypatch.setattr(gt, "apply_preset", lambda config, preset_name: None)
+
+    config = TranscriberGUI._build_transcription_config(fake_gui)
+
+    assert config.noise_reduction_enabled is False
+    assert config.normalize_audio is True
 
 
 def _build_fake_gui() -> Any:

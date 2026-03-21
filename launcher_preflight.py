@@ -6,12 +6,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
-from app_paths import get_resource_root
 from config import AppConfig, get_config
 from grammar_postprocessor import get_languagetool_runtime_status, get_verb_dictionary_path
 
 REALTIME_MODEL_NAME = "distil-large-v3"
-VERB_DICT_PATH = get_resource_root() / "data" / "verb-form-vocab.txt"
 
 
 @dataclass(frozen=True)
@@ -23,18 +21,40 @@ class PreflightItem:
     detail: str
 
 
+def _bootstrap_runtime_environment() -> None:
+    """Apply the shared runtime bootstrap only when cache probes actually run."""
+    from runtime_bootstrap import bootstrap_runtime
+
+    bootstrap_runtime()
+
+
 def resolve_whisper_model_from_cache(model_name: str) -> Path:
     """Resolve a faster-whisper model from the local cache only."""
-    from faster_whisper import download_model
+    _bootstrap_runtime_environment()
+    from faster_whisper.utils import _MODELS as faster_whisper_models
+    from huggingface_hub import try_to_load_from_cache
 
-    return Path(download_model(model_name, local_files_only=True))
+    repo_id = model_name if "/" in model_name else faster_whisper_models.get(model_name)
+    if repo_id is None:
+        raise ValueError(f"Unknown Whisper model: {model_name}")
+
+    cached_config = try_to_load_from_cache(repo_id=repo_id, filename="config.json")
+    if not isinstance(cached_config, str):
+        raise FileNotFoundError(model_name)
+
+    return Path(cached_config).parent
 
 
 def resolve_hf_file_from_cache(repo_id: str, filename: str) -> Path:
     """Resolve a Hugging Face file from the local cache only."""
-    from huggingface_hub import hf_hub_download
+    _bootstrap_runtime_environment()
+    from huggingface_hub import try_to_load_from_cache
 
-    return Path(hf_hub_download(repo_id=repo_id, filename=filename, local_files_only=True))
+    cached_file = try_to_load_from_cache(repo_id=repo_id, filename=filename)
+    if not isinstance(cached_file, str):
+        raise FileNotFoundError(f"{repo_id}:{filename}")
+
+    return Path(cached_file)
 
 
 def inspect_whisper_model(model_name: str) -> PreflightItem:
@@ -101,8 +121,7 @@ def inspect_language_tool_runtime() -> PreflightItem:
     runtime_status = get_languagetool_runtime_status()
     if runtime_status.available:
         return PreflightItem("LanguageTool fallback", "ok", runtime_status.detail)
-    detail = runtime_status.detail.lower()
-    if "can't find languagetool-standalone" in detail or "assets missing" in detail:
+    if runtime_status.state == "missing_assets":
         return PreflightItem(
             "LanguageTool fallback",
             "info",

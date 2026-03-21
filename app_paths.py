@@ -8,6 +8,8 @@ import traceback
 from pathlib import Path
 
 APP_DIR_NAME = "YouTubeTranscriber"
+_WINDOWS_DLL_DIRECTORY_HANDLES: list[object] = []
+_REGISTERED_WINDOWS_DLL_DIRS: set[str] = set()
 
 
 def is_frozen_app() -> bool:
@@ -121,6 +123,34 @@ def get_runtime_dll_search_roots() -> list[Path]:
     return _dedupe_resolved_paths(roots)
 
 
+def _load_ctypes_module():
+    """Import ctypes lazily so tests can patch the loader without touching sys.modules."""
+    import ctypes
+
+    return ctypes
+
+
+def register_windows_dll_directory(path: str | Path) -> bool:
+    """Register a Windows DLL search directory and retain the returned handle."""
+    add_dll_directory = getattr(os, "add_dll_directory", None)
+    if add_dll_directory is None:
+        return False
+
+    resolved_path = str(Path(path).resolve())
+    normalized_path = os.path.normcase(resolved_path)
+    if normalized_path in _REGISTERED_WINDOWS_DLL_DIRS:
+        return True
+
+    try:
+        handle = add_dll_directory(resolved_path)
+    except OSError:
+        return False
+
+    _WINDOWS_DLL_DIRECTORY_HANDLES.append(handle)
+    _REGISTERED_WINDOWS_DLL_DIRS.add(normalized_path)
+    return True
+
+
 def _configure_windows_dll_search_paths() -> None:
     """Ensure bundled DLL directories are discoverable on blank Windows installs."""
     existing_roots = [str(path) for path in get_runtime_dll_search_roots() if path.exists()]
@@ -135,15 +165,8 @@ def _configure_windows_dll_search_paths() -> None:
     if path_prefix:
         os.environ["PATH"] = os.pathsep.join(path_prefix + path_parts)
 
-    add_dll_directory = getattr(os, "add_dll_directory", None)
-    if add_dll_directory is None:
-        return
-
     for root in existing_roots:
-        try:
-            add_dll_directory(root)
-        except OSError:
-            continue
+        register_windows_dll_directory(root)
 
 
 def _get_torch_dll_dir() -> Path | None:
@@ -170,7 +193,7 @@ def preload_windows_torch_dependencies() -> list[str]:
         return statuses
 
     try:
-        import ctypes
+        ctypes = _load_ctypes_module()
     except Exception as exc:
         statuses.append(f"ctypes-import=failed:{exc}")
         return statuses

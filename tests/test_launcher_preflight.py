@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 from config import AppConfig
+from grammar_postprocessor import LanguageToolRuntimeStatus
 import launcher_preflight as launcher_preflight
 
 
@@ -62,6 +65,93 @@ def test_inspect_gector_model_reports_cached(monkeypatch, tmp_path: Path):
     assert item.status == "ok"
     assert item.label == "Grammar model 'example/gector'"
     assert str(tmp_path) in item.detail
+
+
+def test_resolve_whisper_model_from_cache_uses_bootstrap_and_cache_lookup(monkeypatch, tmp_path: Path):
+    bootstrap_calls = {"count": 0}
+    snapshot_dir = tmp_path / "hub" / "models--example--whisper" / "snapshots" / "abc123"
+    config_path = snapshot_dir / "config.json"
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    config_path.write_text("{}", encoding="utf-8")
+
+    monkeypatch.setattr(
+        launcher_preflight,
+        "_bootstrap_runtime_environment",
+        lambda: bootstrap_calls.__setitem__("count", bootstrap_calls["count"] + 1),
+    )
+    monkeypatch.setitem(sys.modules, "faster_whisper.utils", SimpleNamespace(_MODELS={"large-v3": "example/whisper"}))
+    monkeypatch.setitem(
+        sys.modules,
+        "huggingface_hub",
+        SimpleNamespace(try_to_load_from_cache=lambda repo_id, filename: str(config_path)),
+    )
+
+    resolved = launcher_preflight.resolve_whisper_model_from_cache("large-v3")
+
+    assert bootstrap_calls["count"] == 1
+    assert resolved == snapshot_dir.resolve()
+
+
+def test_resolve_hf_file_from_cache_uses_bootstrap_and_requires_cached_file(monkeypatch, tmp_path: Path):
+    bootstrap_calls = {"count": 0}
+    cached_file = tmp_path / "hub" / "models--example--gector" / "snapshots" / "abc123" / "config.json"
+    cached_file.parent.mkdir(parents=True, exist_ok=True)
+    cached_file.write_text("{}", encoding="utf-8")
+
+    monkeypatch.setattr(
+        launcher_preflight,
+        "_bootstrap_runtime_environment",
+        lambda: bootstrap_calls.__setitem__("count", bootstrap_calls["count"] + 1),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "huggingface_hub",
+        SimpleNamespace(try_to_load_from_cache=lambda repo_id, filename: str(cached_file)),
+    )
+
+    resolved = launcher_preflight.resolve_hf_file_from_cache("example/gector", "config.json")
+
+    assert bootstrap_calls["count"] == 1
+    assert resolved == cached_file.resolve()
+
+    monkeypatch.setitem(
+        sys.modules,
+        "huggingface_hub",
+        SimpleNamespace(try_to_load_from_cache=lambda repo_id, filename: None),
+    )
+
+    try:
+        launcher_preflight.resolve_hf_file_from_cache("example/gector", "config.json")
+    except FileNotFoundError:
+        pass
+    else:
+        raise AssertionError("Expected FileNotFoundError when cache lookup misses")
+
+
+def test_inspect_language_tool_runtime_reports_missing_assets_as_info(monkeypatch):
+    monkeypatch.setattr(
+        launcher_preflight,
+        "get_languagetool_runtime_status",
+        lambda: LanguageToolRuntimeStatus(False, "not cached", state="missing_assets"),
+    )
+
+    item = launcher_preflight.inspect_language_tool_runtime()
+
+    assert item.status == "info"
+    assert "First fallback use will download" in item.detail
+
+
+def test_inspect_language_tool_runtime_reports_other_failures_as_warning(monkeypatch):
+    monkeypatch.setattr(
+        launcher_preflight,
+        "get_languagetool_runtime_status",
+        lambda: LanguageToolRuntimeStatus(False, "Java missing", state="missing_java"),
+    )
+
+    item = launcher_preflight.inspect_language_tool_runtime()
+
+    assert item.status == "warning"
+    assert item.detail == "Java missing"
 
 
 def test_collect_preflight_items_deduplicates_matching_whisper_models(monkeypatch):

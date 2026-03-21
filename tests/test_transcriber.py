@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import os
 import sys
+from types import SimpleNamespace
 
 
 class TestTranscribeHelpers:
@@ -122,3 +124,106 @@ class TestTranscribeHelpers:
         ffmpeg_dir = find_ffmpeg()
 
         assert ffmpeg_dir == str(bundle_root)
+
+    def test_ensure_ffmpeg_on_path_adds_directory_once(self, monkeypatch):
+        from youtube_transcriber import _ensure_ffmpeg_on_path
+
+        monkeypatch.setenv("PATH", r"C:\Windows\System32")
+
+        _ensure_ffmpeg_on_path(r"C:\ffmpeg\bin", context="test")
+        _ensure_ffmpeg_on_path(r"C:\ffmpeg\bin", context="test")
+
+        path_entries = os.environ["PATH"].split(os.pathsep)
+        assert path_entries[0] == r"C:\ffmpeg\bin"
+        assert path_entries.count(r"C:\ffmpeg\bin") == 1
+
+    def test_load_whisper_pipeline_with_fallback_retries_on_cpu(self, monkeypatch):
+        from youtube_transcriber import _load_whisper_pipeline_with_fallback
+
+        calls: list[tuple[str, str]] = []
+
+        def _fake_build(model_name: str, *, device: str, compute_type: str):
+            calls.append((device, compute_type))
+            if device == "cuda":
+                raise RuntimeError("cublas missing")
+            return "base-model", "pipeline"
+
+        monkeypatch.setattr("youtube_transcriber._build_whisper_pipeline", _fake_build)
+
+        base_model, pipeline, device, compute_type = _load_whisper_pipeline_with_fallback(
+            "large-v3",
+            device="cuda",
+            compute_type="float16",
+        )
+
+        assert base_model == "base-model"
+        assert pipeline == "pipeline"
+        assert device == "cpu"
+        assert compute_type == "int8"
+        assert calls == [("cuda", "float16"), ("cpu", "int8")]
+
+    def test_run_whisper_transcription_retries_on_cpu_and_collects_segments(self, monkeypatch):
+        from youtube_transcriber import _WhisperExecutionState, _run_whisper_transcription
+        from transcript_types import make_transcript_segment
+
+        transcribe_calls: list[dict[str, object]] = []
+        retry_markers: list[str] = []
+        observed_text: list[str] = []
+
+        class _FailingPipeline:
+            def transcribe(self, input_source, **kwargs):
+                transcribe_calls.append({"input_source": input_source, **kwargs})
+                raise RuntimeError("cuda driver failure")
+
+        successful_segments = [
+            SimpleNamespace(start=0.0, end=1.5, text="hello world"),
+        ]
+        successful_info = SimpleNamespace(duration=90.0, language="en", language_probability=0.99)
+
+        def _replacement_pipeline(model_name: str, *, device: str, compute_type: str):
+            assert model_name == "large-v3"
+            assert device == "cpu"
+            assert compute_type == "int8"
+            return (
+                "cpu-base",
+                SimpleNamespace(
+                    transcribe=lambda input_source, **kwargs: (
+                        transcribe_calls.append({"input_source": input_source, **kwargs}) or None,
+                        (successful_segments, successful_info),
+                    )[1]
+                ),
+            )
+
+        monkeypatch.setattr("youtube_transcriber._build_whisper_pipeline", _replacement_pipeline)
+
+        state = _WhisperExecutionState(
+            model_name="large-v3",
+            base_model="gpu-base",
+            pipeline=_FailingPipeline(),
+            device="cuda",
+            compute_type="float16",
+        )
+
+        segments_data, info, updated_state = _run_whisper_transcription(
+            state,
+            "audio.wav",
+            kwargs={"beam_size": 5},
+            cpu_recovery_overrides={"beam_size": 1, "batch_size": 8},
+            before_retry=lambda: retry_markers.append("retried"),
+            segment_observer=lambda segment, info_obj: observed_text.append(
+                f"{segment.text}:{info_obj.language}"
+            ),
+        )
+
+        assert segments_data == [
+            make_transcript_segment(start=0.0, end=1.5, text="hello world"),
+        ]
+        assert info is successful_info
+        assert updated_state.device == "cpu"
+        assert updated_state.compute_type == "int8"
+        assert retry_markers == ["retried"]
+        assert observed_text == ["hello world:en"]
+        assert transcribe_calls == [
+            {"input_source": "audio.wav", "beam_size": 5},
+            {"input_source": "audio.wav", "beam_size": 1, "batch_size": 8},
+        ]

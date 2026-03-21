@@ -206,7 +206,7 @@ class TestAppConfig:
 
     def test_save_and_reload_roundtrip_including_ui_and_grammar(self):
         cfg = AppConfig()
-        cfg.ui.splitter_ratios = (0.5, 0.25, 0.25)
+        cfg.ui.output_format = "timestamped"
         cfg.grammar.backend = "languagetool"
         cfg.max_audio_size_mb = 650
 
@@ -216,12 +216,35 @@ class TestAppConfig:
         cfg.save(path)
         loaded = AppConfig.load(path)
 
-        assert loaded.ui.splitter_ratios == (0.5, 0.25, 0.25)
+        assert loaded.ui.output_format == "timestamped"
         assert loaded.grammar.backend == "languagetool"
         assert loaded.max_audio_size_mb == 650
 
         raw = json.loads(path.read_text(encoding="utf-8"))
-        assert isinstance(raw["ui"]["splitter_ratios"], list)
+        assert set(raw["ui"]) == {"last_youtube_url", "output_format", "transcription_preset"}
+
+    def test_load_ignores_legacy_ui_fields(self):
+        data = {
+            "ui": {
+                "theme": "dark",
+                "accent_color": "blue",
+                "window_width": 1280,
+                "window_height": 1024,
+                "splitter_ratios": [0.4, 0.2, 0.4],
+                "remember_window_position": True,
+                "last_youtube_url": "https://youtube.com/watch?v=dQw4w9WgXcQ",
+                "output_format": "timestamped",
+                "transcription_preset": "balanced",
+            }
+        }
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
+            json.dump(data, f)
+            f.flush()
+            cfg = AppConfig.load(Path(f.name))
+
+        assert cfg.ui.last_youtube_url.endswith("dQw4w9WgXcQ")
+        assert cfg.ui.output_format == "timestamped"
+        assert cfg.ui.transcription_preset == "balanced"
 
     def test_load_invalid_json_returns_defaults(self):
         with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:

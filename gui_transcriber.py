@@ -9,7 +9,8 @@ Features Material Design styling, responsive layout, and theme system.
 
 from __future__ import annotations
 
-from dataclasses import asdict
+from contextlib import contextmanager
+from dataclasses import asdict, dataclass
 import json
 import logging
 import os
@@ -29,7 +30,6 @@ from app_paths import get_log_path
 from torch_runtime import get_torch
 
 import numpy as np
-import sounddevice as sd
 from PyQt6 import QtCore, QtGui, QtWidgets
 
 # WhisperModel imported lazily in load_whisper_model() to speed up GUI startup
@@ -71,7 +71,6 @@ from widgets import (
     GlassCard,
     MaterialButton,
     ResponsiveSplitter,
-    AnimationManager,
 )
 
 # Suppress ctranslate2 pkg_resources deprecation warning
@@ -91,6 +90,23 @@ BACKEND_LOGGER_LEVELS: dict[str, int] = {
 BACKEND_LOG_NAME = "youtube_transcriber.log"
 
 _backend_file_handler: RotatingFileHandler | None = None
+
+
+def _get_sounddevice_module():
+    """Import sounddevice only when microphone paths need it."""
+    import sounddevice
+
+    return sounddevice
+
+
+@dataclass(frozen=True)
+class GrammarPassResult:
+    """Outcome of an optional grammar-processing pass."""
+
+    transcript: str
+    segments_data: TranscriptSegments
+    grammar_enhanced: bool
+    completed: bool
 
 
 class QueueLogger(StringIO):
@@ -182,7 +198,7 @@ def _build_rotating_file_handler(log_name: str) -> RotatingFileHandler:
 
 
 def _get_backend_file_handler() -> RotatingFileHandler:
-    """Reuse one rotating handler for the shared backend log file."""
+    """Reuse one backend file handler across the backend logger fan-out."""
     global _backend_file_handler
     if _backend_file_handler is None:
         _backend_file_handler = _build_rotating_file_handler(BACKEND_LOG_NAME)
@@ -254,6 +270,101 @@ def setup_gui_logging(target_queue: queue.Queue[QueueMessage]) -> None:
     logging.getLogger('PyQt6').setLevel(logging.WARNING)
 
 
+@contextmanager
+def _worker_queue_bridge(target_queue: queue.Queue[QueueMessage]):
+    """Mirror backend stdout/logging into the GUI queue for the duration of a worker job."""
+    queue_handler, logger_states = _attach_worker_queue_logging(target_queue)
+    progress_redirector = QueueLogger(target_queue)
+    old_stdout = sys.stdout
+    try:
+        sys.stdout = progress_redirector
+        yield
+    finally:
+        progress_redirector.flush()
+        sys.stdout = old_stdout
+        _detach_worker_queue_logging(queue_handler, logger_states)
+
+
+def _queue_transcript_snapshot(
+    target_queue: queue.Queue[QueueMessage],
+    transcript: str,
+    segments_data: TranscriptSegments | None,
+    *,
+    output_format: str = "plain",
+    append: bool = False,
+) -> None:
+    """Queue transcript text plus timestamp data for the UI thread."""
+    normalized_segments = segments_data if segments_data else []
+    rendered_transcript = transcript
+    if output_format == "timestamped" and normalized_segments:
+        rendered_transcript = format_transcript_with_timestamps(normalized_segments)
+
+    target_queue.put(("segments", normalized_segments))
+    message_kind = "append_transcript" if append else "transcript"
+    target_queue.put((message_kind, rendered_transcript))
+
+
+def _apply_optional_grammar_corrections(
+    target_queue: queue.Queue[QueueMessage],
+    transcript: str,
+    segments_data: TranscriptSegments,
+    grammar_config: GrammarConfig,
+    *,
+    warning_color: str | None = None,
+    start_status: str | None = None,
+    start_progress: str = "Fixing grammar...\n",
+    success_progress: str = "Grammar correction applied.\n",
+    no_change_progress: str = "Grammar: No changes needed or unavailable.\n",
+) -> GrammarPassResult:
+    """Run grammar correction when enabled and report the result back to the queue."""
+    if not grammar_config.enabled:
+        return GrammarPassResult(transcript, segments_data, False, False)
+
+    if start_status:
+        target_queue.put(("status", start_status, warning_color))
+    target_queue.put(("progress", start_progress))
+
+    try:
+        processed_transcript, processed_segments, grammar_enhanced = post_process_grammar(
+            text=transcript,
+            segments_data=segments_data,
+            config=grammar_config,
+        )
+    except Exception as grammar_exc:
+        gui_logger.warning(f"Grammar correction failed: {grammar_exc}")
+        target_queue.put(("progress", f"Grammar correction skipped: {grammar_exc}\n"))
+        return GrammarPassResult(transcript, segments_data, False, False)
+
+    if processed_segments is None:
+        processed_segments = segments_data
+
+    target_queue.put(
+        ("progress", success_progress if grammar_enhanced else no_change_progress)
+    )
+    return GrammarPassResult(processed_transcript, processed_segments, grammar_enhanced, True)
+
+
+def _build_transcription_complete_status(
+    *,
+    grammar_enhanced: bool,
+    segment_count: int | None = None,
+    word_count: int | None = None,
+) -> str:
+    """Build the success status text shown after a transcription finishes."""
+    if word_count is not None:
+        status_msg = f"Transcription complete ({word_count} words)"
+        if grammar_enhanced:
+            status_msg += " - grammar corrected"
+        return status_msg
+
+    status_msg = "Transcription complete!"
+    if segment_count is not None:
+        status_msg += f" ({segment_count} segments)"
+    if grammar_enhanced:
+        status_msg += " (grammar corrected)"
+    return status_msg
+
+
 class TranscriberGUI(QtWidgets.QMainWindow):
     """PyQt6-based GUI for YouTube transcription and microphone recording with Whisper AI."""
 
@@ -289,10 +400,6 @@ class TranscriberGUI(QtWidgets.QMainWindow):
 
         # Store transcript segments with timestamps (always dict format with 'start', 'end', 'text')
         self._current_segments_data: Optional[TranscriptSegments] = None
-
-        # Animation components
-        self._animation_manager = AnimationManager()
-        self._cards_to_animate: list[GlassCard] = []
 
         # Set up logging
         setup_gui_logging(self.output_queue)
@@ -371,6 +478,7 @@ class TranscriberGUI(QtWidgets.QMainWindow):
 
         self.filler_cleanup_checkbox.setChecked(self.config.transcription.clean_filler_words)
         self.noise_reduction_checkbox.setChecked(self.config.transcription.noise_reduction_enabled)
+        self.normalize_audio_checkbox.setChecked(self.config.transcription.normalize_audio)
 
         gui_logger.debug("Settings loaded from previous session")
 
@@ -388,7 +496,7 @@ class TranscriberGUI(QtWidgets.QMainWindow):
         self.config.transcription.hotwords = hotwords or None
         self.config.transcription.clean_filler_words = self.filler_cleanup_checkbox.isChecked()
         self.config.transcription.noise_reduction_enabled = self.noise_reduction_checkbox.isChecked()
-        self.config.transcription.normalize_audio = self.noise_reduction_checkbox.isChecked()
+        self.config.transcription.normalize_audio = self.normalize_audio_checkbox.isChecked()
         save_config()
 
         gui_logger.debug("Settings saved")
@@ -450,7 +558,7 @@ class TranscriberGUI(QtWidgets.QMainWindow):
         title.setStyleSheet(self.theme.get_title_style())
         main_layout.addWidget(title)
 
-        # Input cards section - collect for staggered animation
+        # Input cards section
         self._youtube_card = self._build_youtube_card()
         self._local_file_card = self._build_local_file_card()
         self._speech_card = self._build_speech_card()
@@ -461,14 +569,6 @@ class TranscriberGUI(QtWidgets.QMainWindow):
         main_layout.addWidget(self._speech_card)
         main_layout.addWidget(self._transcription_settings_card)
 
-        # Track cards for startup animation
-        self._cards_to_animate = [
-            self._youtube_card,
-            self._local_file_card,
-            self._speech_card,
-            self._transcription_settings_card,
-        ]
-
         # Content splitter with responsive layout
         self.content_splitter = ResponsiveSplitter(QtCore.Qt.Orientation.Vertical, self)
         self.content_splitter.setSizePolicy(
@@ -476,7 +576,7 @@ class TranscriberGUI(QtWidgets.QMainWindow):
             QtWidgets.QSizePolicy.Policy.Expanding
         )
 
-        # Build content cards and track for animation
+        # Build content cards
         self._live_preview_card = self._build_live_preview_card()
         self._progress_card = self._build_progress_card()
         self._transcript_card = self._build_transcript_card()
@@ -484,13 +584,6 @@ class TranscriberGUI(QtWidgets.QMainWindow):
         self.content_splitter.addWidget(self._live_preview_card)
         self.content_splitter.addWidget(self._progress_card)
         self.content_splitter.addWidget(self._transcript_card)
-
-        # Add content cards to animation list
-        self._cards_to_animate.extend([
-            self._live_preview_card,
-            self._progress_card,
-            self._transcript_card,
-        ])
 
         # Restore splitter state or set defaults
         settings = QtCore.QSettings("AnthropicClaude", "YouTubeTranscriber")
@@ -691,15 +784,22 @@ class TranscriberGUI(QtWidgets.QMainWindow):
         self.noise_reduction_checkbox = QtWidgets.QCheckBox("Noise Reduction")
         self.noise_reduction_checkbox.setChecked(True)
         self.noise_reduction_checkbox.setToolTip(
-            "Apply spectral noise reduction and loudness\n"
-            "normalization before transcription.\n"
-            "Improves accuracy in noisy environments."
+            "Apply spectral noise reduction before transcription.\n"
+            "Useful for hiss, fan noise, and room noise."
+        )
+
+        self.normalize_audio_checkbox = QtWidgets.QCheckBox("Normalize Audio")
+        self.normalize_audio_checkbox.setChecked(True)
+        self.normalize_audio_checkbox.setToolTip(
+            "Apply loudness normalization before transcription.\n"
+            "Useful when speech is too quiet or inconsistent."
         )
 
         row2.addWidget(self.grammar_enhance_checkbox)
         row2.addWidget(self.grammar_status_label)
         row2.addWidget(self.filler_cleanup_checkbox)
         row2.addWidget(self.noise_reduction_checkbox)
+        row2.addWidget(self.normalize_audio_checkbox)
         row2.addStretch(1)
 
         main_layout.addLayout(row1)
@@ -893,6 +993,7 @@ class TranscriberGUI(QtWidgets.QMainWindow):
     def get_microphone_list(self) -> list[str]:
         """Return list of available microphone descriptions."""
         try:
+            sd = _get_sounddevice_module()
             devices = sd.query_devices()
         except Exception as exc:
             self.output_queue.put(("error", f"Failed to query audio devices: {exc}"))
@@ -909,6 +1010,7 @@ class TranscriberGUI(QtWidgets.QMainWindow):
     def auto_detect_microphone(self) -> None:
         """Auto-detect and select the best real microphone, filtering out virtual devices."""
         try:
+            sd = _get_sounddevice_module()
             devices = sd.query_devices()
         except Exception as exc:
             self.update_status(f"Failed to query devices: {exc}", self.theme.colors.error)
@@ -1098,7 +1200,7 @@ class TranscriberGUI(QtWidgets.QMainWindow):
             config.hotwords = hotwords
         config.clean_filler_words = self.filler_cleanup_checkbox.isChecked()
         config.noise_reduction_enabled = self.noise_reduction_checkbox.isChecked()
-        config.normalize_audio = self.noise_reduction_checkbox.isChecked()
+        config.normalize_audio = self.normalize_audio_checkbox.isChecked()
         return config
 
     def _build_grammar_config(self) -> GrammarConfig:
@@ -1118,122 +1220,111 @@ class TranscriberGUI(QtWidgets.QMainWindow):
         transcription_config = transcription_config or self._build_transcription_config()
         grammar_config = grammar_config or self._build_grammar_config()
 
-        queue_handler, logger_states = _attach_worker_queue_logging(self.output_queue)
-        progress_redirector = QueueLogger(self.output_queue)
-        old_stdout = sys.stdout
-
         try:
-            sys.stdout = progress_redirector
+            with _worker_queue_bridge(self.output_queue):
+                self.output_queue.put(("status", "Validating URL...", self.theme.colors.warning))
 
-            self.output_queue.put(("status", "Validating URL...", self.theme.colors.warning))
+                if self._youtube_cancel_event.is_set():
+                    self.output_queue.put(("cancelled", ""))
+                    return
 
-            if self._youtube_cancel_event.is_set():
-                self.output_queue.put(("cancelled", ""))
-                return
+                is_valid, error_msg = validate_youtube_url(url)
+                if not is_valid:
+                    self.output_queue.put(("error", f"Invalid URL: {error_msg}"))
+                    return
 
-            is_valid, error_msg = validate_youtube_url(url)
-            if not is_valid:
-                self.output_queue.put(("error", f"Invalid URL: {error_msg}"))
-                return
+                video_id = extract_video_id(url)
+                if not video_id:
+                    self.output_queue.put(("error", "Could not extract video ID from the provided URL."))
+                    return
 
-            video_id = extract_video_id(url)
-            if not video_id:
-                self.output_queue.put(("error", "Could not extract video ID from the provided URL."))
-                return
+                if self._youtube_cancel_event.is_set():
+                    self.output_queue.put(("cancelled", ""))
+                    return
 
-            if self._youtube_cancel_event.is_set():
-                self.output_queue.put(("cancelled", ""))
-                return
+                self.output_queue.put(("status", f"Processing video: {video_id}", self.theme.colors.warning))
 
-            self.output_queue.put(("status", f"Processing video: {video_id}", self.theme.colors.warning))
-
-            gui_logger.info(f"Processing video ID: {video_id}")
-            gui_logger.info("-" * 50)
-
-            transcript, segments_data = get_youtube_transcript(video_id)
-
-            if self._youtube_cancel_event.is_set():
-                self.output_queue.put(("cancelled", ""))
-                return
-
-            if not transcript:
-                gui_logger.info("\nNo captions available. Downloading audio and transcribing...")
+                gui_logger.info(f"Processing video ID: {video_id}")
                 gui_logger.info("-" * 50)
 
+                transcript, segments_data = get_youtube_transcript(video_id)
+
                 if self._youtube_cancel_event.is_set():
                     self.output_queue.put(("cancelled", ""))
                     return
 
-                ffmpeg_location = find_ffmpeg()
-                audio_file = download_audio(url, f"temp_audio_{video_id}", ffmpeg_location)
+                if not transcript:
+                    gui_logger.info("\nNo captions available. Downloading audio and transcribing...")
+                    gui_logger.info("-" * 50)
+
+                    if self._youtube_cancel_event.is_set():
+                        self.output_queue.put(("cancelled", ""))
+                        return
+
+                    ffmpeg_location = find_ffmpeg()
+                    audio_file = download_audio(url, f"temp_audio_{video_id}", ffmpeg_location)
+
+                    if self._youtube_cancel_event.is_set():
+                        if audio_file and os.path.exists(audio_file):
+                            os.remove(audio_file)
+                        self.output_queue.put(("cancelled", ""))
+                        return
+
+                    if not audio_file:
+                        self.output_queue.put(("error", "Failed to download audio for transcription."))
+                        return
+
+                    self.output_queue.put(("status", "Loading Whisper and transcribing audio...", self.theme.colors.warning))
+
+                    # Unload GECToR model to free GPU memory for Whisper
+                    unload_gector()
+                    torch_module = get_torch(context="gui_transcriber:youtube_empty_cache")
+                    if torch_module is not None and torch_module.cuda.is_available():
+                        torch_module.cuda.empty_cache()
+
+                    transcript, segments_data = transcribe_audio(audio_file, ffmpeg_location, config=transcription_config)
 
                 if self._youtube_cancel_event.is_set():
-                    if audio_file and os.path.exists(audio_file):
-                        os.remove(audio_file)
                     self.output_queue.put(("cancelled", ""))
                     return
 
-                if not audio_file:
-                    self.output_queue.put(("error", "Failed to download audio for transcription."))
-                    return
-
-                self.output_queue.put(("status", "Loading Whisper and transcribing audio...", self.theme.colors.warning))
-
-                # Unload GECToR model to free GPU memory for Whisper
-                unload_gector()
-                torch_module = get_torch(context="gui_transcriber:youtube_empty_cache")
-                if torch_module is not None and torch_module.cuda.is_available():
-                    torch_module.cuda.empty_cache()
-
-                transcript, segments_data = transcribe_audio(audio_file, ffmpeg_location, config=transcription_config)
-
-            if self._youtube_cancel_event.is_set():
-                self.output_queue.put(("cancelled", ""))
-                return
-
-            if transcript:
-                # Grammar Post-Processing (if enabled)
-                grammar_enhanced = False
-                if grammar_config.enabled:
-                    self.output_queue.put(("status", "Applying grammar corrections...", self.theme.colors.warning))
-                    self.output_queue.put(("progress", "\nStarting grammar correction...\n"))
-
-                    try:
-                        transcript, segments_data, grammar_enhanced = post_process_grammar(
-                            text=transcript,
-                            segments_data=segments_data,
-                            config=grammar_config
+                if transcript:
+                    # Grammar Post-Processing (if enabled)
+                    grammar_enhanced = False
+                    if grammar_config.enabled:
+                        grammar_result = _apply_optional_grammar_corrections(
+                            self.output_queue,
+                            transcript,
+                            segments_data if segments_data else [],
+                            grammar_config,
+                            warning_color=self.theme.colors.warning,
+                            start_status="Applying grammar corrections...",
+                            start_progress="\nStarting grammar correction...\n",
+                            success_progress="Grammar correction applied successfully.\n",
                         )
-                        if grammar_enhanced:
-                            self.output_queue.put(("progress", "Grammar correction applied successfully.\n"))
-                        else:
-                            self.output_queue.put(("progress", "Grammar: No changes needed or unavailable.\n"))
-                    except Exception as grammar_exc:
-                        gui_logger.warning(f"Grammar correction failed: {grammar_exc}")
-                        self.output_queue.put(("progress", f"Grammar correction skipped: {grammar_exc}\n"))
+                        if grammar_result.completed:
+                            transcript = grammar_result.transcript
+                            segments_data = grammar_result.segments_data
+                            grammar_enhanced = grammar_result.grammar_enhanced
 
-                if output_format == "timestamped" and segments_data:
-                    formatted_transcript = format_transcript_with_timestamps(segments_data)
-                    self.output_queue.put(("transcript", formatted_transcript))
+                    _queue_transcript_snapshot(
+                        self.output_queue,
+                        transcript,
+                        segments_data,
+                        output_format=str(output_format or "plain"),
+                    )
+
+                    status_msg = _build_transcription_complete_status(
+                        grammar_enhanced=grammar_enhanced,
+                    )
+                    self.output_queue.put(("status", status_msg, self.theme.colors.success_light))
                 else:
-                    self.output_queue.put(("transcript", transcript))
-                self.output_queue.put(("segments", segments_data if segments_data else []))
-
-                status_msg = "Transcription complete!"
-                if grammar_enhanced:
-                    status_msg += " (grammar corrected)"
-                self.output_queue.put(("status", status_msg, self.theme.colors.success_light))
-            else:
-                self.output_queue.put(("error", "Failed to obtain transcript."))
+                    self.output_queue.put(("error", "Failed to obtain transcript."))
 
         except Exception as exc:
             gui_logger.error(f"YouTube transcription error: {exc}", exc_info=True)
             self.output_queue.put(("error", f"Error: {exc}"))
         finally:
-            # Always restore stdout and remove handler
-            progress_redirector.flush()
-            sys.stdout = old_stdout
-            _detach_worker_queue_logging(queue_handler, logger_states)
             self.output_queue.put(("transcribe_finished", ""))
             self.output_queue.put(("transcribe_thread_done", ""))
 
@@ -1302,80 +1393,66 @@ class TranscriberGUI(QtWidgets.QMainWindow):
         grammar_config: GrammarConfig,
     ) -> None:
         """Background thread for local file transcription."""
-        queue_handler, logger_states = _attach_worker_queue_logging(self.output_queue)
-        progress_redirector = QueueLogger(self.output_queue)
-        old_stdout = sys.stdout
-
         try:
-            sys.stdout = progress_redirector
+            with _worker_queue_bridge(self.output_queue):
+                self.output_queue.put(("status", "Preparing local file...", self.theme.colors.warning))
+                self.output_queue.put(("progress", f"Selected file: {file_path}\n"))
 
-            self.output_queue.put(("status", "Preparing local file...", self.theme.colors.warning))
-            self.output_queue.put(("progress", f"Selected file: {file_path}\n"))
+                # Unload GECToR model to free GPU memory for Whisper
+                self.output_queue.put(("progress", "Freeing GPU memory...\n"))
+                unload_gector()
+                torch_module = get_torch(context="gui_transcriber:file_empty_cache")
+                if torch_module is not None and torch_module.cuda.is_available():
+                    torch_module.cuda.empty_cache()
 
-            # Unload GECToR model to free GPU memory for Whisper
-            self.output_queue.put(("progress", "Freeing GPU memory...\n"))
-            unload_gector()
-            torch_module = get_torch(context="gui_transcriber:file_empty_cache")
-            if torch_module is not None and torch_module.cuda.is_available():
-                torch_module.cuda.empty_cache()
+                ffmpeg_location = find_ffmpeg()
+                self.output_queue.put(("status", "Analyzing audio tracks and loading Whisper...", self.theme.colors.warning))
 
-            ffmpeg_location = find_ffmpeg()
-            self.output_queue.put(("status", "Analyzing audio tracks and loading Whisper...", self.theme.colors.warning))
-
-            transcript, segments_data = transcribe_local_file(
-                file_path=file_path,
-                ffmpeg_location=ffmpeg_location,
-                config=transcription_config,
-            )
-
-            if transcript.strip():
-                grammar_enhanced = False
-                if grammar_config.enabled:
-                    self.output_queue.put(("status", "Applying grammar corrections...", self.theme.colors.warning))
-                    self.output_queue.put(("progress", "Fixing grammar...\n"))
-                    try:
-                        transcript, segments_data, grammar_enhanced = post_process_grammar(
-                            text=transcript,
-                            segments_data=segments_data,
-                            config=grammar_config
-                        )
-                        if grammar_enhanced:
-                            self.output_queue.put(("progress", "Grammar correction applied.\n"))
-                        else:
-                            self.output_queue.put(("progress", "Grammar: No changes needed or unavailable.\n"))
-                    except Exception as grammar_exc:
-                        gui_logger.warning(f"Grammar correction failed: {grammar_exc}")
-                        self.output_queue.put(("progress", f"Grammar correction skipped: {grammar_exc}\n"))
-
-                self.output_queue.put(("segments", segments_data))
-                self.output_queue.put(("transcript", transcript))
-
-                status_msg = "Transcription complete!"
-                if segments_data:
-                    status_msg += f" ({len(segments_data)} segments)"
-                if grammar_enhanced:
-                    status_msg += " (grammar corrected)"
-                self.output_queue.put(("status", status_msg, self.theme.colors.success_light))
-                gui_logger.info(f"\nTranscription saved. Words: {len(transcript.split())}")
-            else:
-                self.output_queue.put(("segments", segments_data))
-                self.output_queue.put(("transcript", transcript))
-                segment_count = len(segments_data) if segments_data else 0
-                self.output_queue.put(
-                    (
-                        "status",
-                        f"No speech detected (returned {segment_count} segments). Check the progress log for audio-track/VAD details.",
-                        self.theme.colors.warning,
-                    )
+                transcript, segments_data = transcribe_local_file(
+                    file_path=file_path,
+                    ffmpeg_location=ffmpeg_location,
+                    config=transcription_config,
                 )
+
+                if transcript.strip():
+                    grammar_enhanced = False
+                    if grammar_config.enabled:
+                        grammar_result = _apply_optional_grammar_corrections(
+                            self.output_queue,
+                            transcript,
+                            segments_data,
+                            grammar_config,
+                            warning_color=self.theme.colors.warning,
+                            start_status="Applying grammar corrections...",
+                        )
+                        if grammar_result.completed:
+                            transcript = grammar_result.transcript
+                            segments_data = grammar_result.segments_data
+                            grammar_enhanced = grammar_result.grammar_enhanced
+
+                    _queue_transcript_snapshot(self.output_queue, transcript, segments_data)
+
+                    status_msg = _build_transcription_complete_status(
+                        grammar_enhanced=grammar_enhanced,
+                        segment_count=len(segments_data) if segments_data else None,
+                    )
+                    self.output_queue.put(("status", status_msg, self.theme.colors.success_light))
+                    gui_logger.info(f"\nTranscription saved. Words: {len(transcript.split())}")
+                else:
+                    _queue_transcript_snapshot(self.output_queue, transcript, segments_data)
+                    segment_count = len(segments_data) if segments_data else 0
+                    self.output_queue.put(
+                        (
+                            "status",
+                            f"No speech detected (returned {segment_count} segments). Check the progress log for audio-track/VAD details.",
+                            self.theme.colors.warning,
+                        )
+                    )
 
         except Exception as exc:
             gui_logger.error(f"Local file transcription error: {exc}", exc_info=True)
             self.output_queue.put(("error", f"Error: {exc}"))
         finally:
-            progress_redirector.flush()
-            sys.stdout = old_stdout
-            _detach_worker_queue_logging(queue_handler, logger_states)
             self.output_queue.put(("transcribe_finished", ""))
             self.output_queue.put(("local_file_done", ""))
 
@@ -1641,31 +1718,31 @@ class TranscriberGUI(QtWidgets.QMainWindow):
                 # Grammar Post-Processing (if enabled)
                 grammar_enhanced = False
                 if grammar_config.enabled:
-                    self.output_queue.put(("progress", "Fixing grammar...\n"))
-
-                    try:
-                        final_transcript, segments_data, grammar_enhanced = post_process_grammar(
-                            text=final_transcript,
-                            segments_data=segments_data,
-                            config=grammar_config
-                        )
-                        if grammar_enhanced:
-                            self.output_queue.put(("progress", "Grammar correction applied.\n"))
-                        else:
-                            self.output_queue.put(("progress", "Grammar: No changes needed or unavailable.\n"))
-                    except Exception as grammar_exc:
-                        self.output_queue.put(("progress", f"Grammar correction skipped: {grammar_exc}\n"))
+                    grammar_result = _apply_optional_grammar_corrections(
+                        self.output_queue,
+                        final_transcript,
+                        segments_data,
+                        grammar_config,
+                    )
+                    final_transcript = grammar_result.transcript
+                    segments_data = grammar_result.segments_data
+                    grammar_enhanced = grammar_result.grammar_enhanced
 
                 word_count = len(final_transcript.split())
 
-                self.output_queue.put(("segments", segments_data))
+                _queue_transcript_snapshot(
+                    self.output_queue,
+                    final_transcript,
+                    segments_data,
+                    append=True,
+                )
                 self.output_queue.put(("progress", f"Transcription complete: {word_count} words\n"))
                 self.output_queue.put(("live_preview", ""))
-                self.output_queue.put(("append_transcript", final_transcript))
 
-                status_msg = f"Transcription complete ({word_count} words)"
-                if grammar_enhanced:
-                    status_msg += " - grammar corrected"
+                status_msg = _build_transcription_complete_status(
+                    grammar_enhanced=grammar_enhanced,
+                    word_count=word_count,
+                )
                 self.output_queue.put(("status", status_msg, self.theme.colors.success_light))
             else:
                 if hallucination_count > 0:
@@ -1708,6 +1785,7 @@ class TranscriberGUI(QtWidgets.QMainWindow):
     def record_audio_whisper_thread(self, mic_descriptor: str) -> None:
         """Background loop capturing audio."""
         try:
+            sd = _get_sounddevice_module()
             mic_index: Optional[int]
             try:
                 mic_index = int(mic_descriptor.split(":")[0]) if ":" in mic_descriptor else None
@@ -2032,22 +2110,8 @@ class TranscriberGUI(QtWidgets.QMainWindow):
         super().closeEvent(close_event)
 
     def run(self) -> None:
-        """Show the window with startup animations."""
+        """Show the window."""
         self.show()
-
-        # Trigger startup animation sequence after a brief delay
-        QtCore.QTimer.singleShot(50, self._play_startup_animation)
-
-    def _play_startup_animation(self) -> None:
-        """Play staggered reveal animation for cards on startup."""
-        if self._cards_to_animate:
-            # Stagger reveal all cards
-            self._animation_manager.staggered_reveal(
-                widgets=self._cards_to_animate,  # type: ignore[arg-type]
-                duration=450,
-                stagger_delay=80,
-                from_scale=0.98,
-            )
 
     def _flash_card_success(self, card: GlassCard) -> None:
         """Flash green glow on a card to indicate success.

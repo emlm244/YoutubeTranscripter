@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import os
-import platform
+import sys
 
 from app_paths import configure_runtime_environment
 
@@ -16,7 +16,7 @@ def bootstrap_runtime() -> None:
     if _BOOTSTRAPPED:
         return
 
-    if platform.system() == "Windows":
+    if sys.platform == "win32":
         os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")
         os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS", "1")
 

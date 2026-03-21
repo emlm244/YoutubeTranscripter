@@ -26,8 +26,11 @@ def main() -> int:
     """Print a JSON array of repo cache roots available on this build machine."""
     config = get_config()
     roots: list[str] = []
+    whisper_models = [config.transcription.whisper_model]
+    if REALTIME_MODEL_NAME != config.transcription.whisper_model:
+        whisper_models.append(REALTIME_MODEL_NAME)
 
-    for model_name in {config.transcription.whisper_model, REALTIME_MODEL_NAME}:
+    for model_name in whisper_models:
         try:
             root = repo_root(resolve_whisper_model_from_cache(model_name))
         except Exception:
@@ -35,13 +38,14 @@ def main() -> int:
         if root and root not in roots:
             roots.append(root)
 
-    for filename in ("config.json", "pytorch_model.bin"):
-        try:
-            root = repo_root(resolve_hf_file_from_cache(config.grammar.gector_model, filename))
-        except Exception:
-            root = None
-        if root and root not in roots:
-            roots.append(root)
+    if config.grammar.enabled:
+        for filename in ("config.json", "pytorch_model.bin"):
+            try:
+                root = repo_root(resolve_hf_file_from_cache(config.grammar.gector_model, filename))
+            except Exception:
+                root = None
+            if root and root not in roots:
+                roots.append(root)
 
     print(json.dumps(roots))
     return 0

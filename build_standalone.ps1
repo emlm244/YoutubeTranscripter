@@ -120,6 +120,7 @@ if (-not $SkipFFmpegBundle) {
 
 if ($IncludeCachedModels) {
     Write-Section "Copying cached model repositories"
+    Write-Host "Including only the models that are both configured and already cached on this build machine." -ForegroundColor Yellow
     $manifest = & $PythonExe build_cache_manifest.py
     if ($LASTEXITCODE -ne 0) {
         throw "Failed to inspect cached model repositories."
@@ -162,6 +163,7 @@ Notes:
 - This is a standalone Windows bundle built from this project.
 - If ffmpeg.exe and ffprobe.exe are present in this folder, the app will use them automatically.
 - If hf-cache is present, the app will use bundled model caches first.
+- -IncludeCachedModels only copies the models that were already cached on the build machine for the current config.
 - If models are not bundled, the first transcription or grammar use may still download them.
 
 Outputs:

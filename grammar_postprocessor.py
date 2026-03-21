@@ -8,6 +8,7 @@ Fallback: LanguageTool (local, no API key needed)
 from __future__ import annotations
 
 from collections.abc import Sequence
+import importlib.util
 import logging
 import os
 import sys
@@ -15,7 +16,7 @@ import threading
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple, overload
+from typing import Any, Dict, List, Literal, Optional, Tuple, overload
 
 from app_paths import get_resource_root, get_writable_app_data_root
 from config import GrammarConfig
@@ -53,6 +54,23 @@ class LanguageToolRuntimeStatus:
 
     available: bool
     detail: str
+    state: Literal[
+        "ready",
+        "missing_assets",
+        "missing_java",
+        "missing_package",
+        "import_failed",
+        "probe_failed",
+    ] = "probe_failed"
+
+
+@dataclass(frozen=True)
+class GectorRuntimeStatus:
+    """Availability details for the lazy GECToR startup probe."""
+
+    available: bool
+    detail: str
+    state: Literal["ready", "ready_on_demand", "needs_download", "unavailable"]
 
 
 def _load_torch_module(*, context: str) -> Any | None:
@@ -74,14 +92,35 @@ def get_verb_dictionary_path() -> Path | None:
     return None
 
 
+def _module_available(module_name: str) -> bool:
+    """Return whether a module can be imported without importing it eagerly."""
+    return importlib.util.find_spec(module_name) is not None
+
+
+def _resolve_cached_hf_file(repo_id: str, filename: str) -> Path | None:
+    """Resolve a Hugging Face file from the local cache without downloading."""
+    if not _module_available("huggingface_hub"):
+        return None
+
+    try:
+        from huggingface_hub import hf_hub_download
+    except Exception:
+        return None
+
+    try:
+        return Path(hf_hub_download(repo_id=repo_id, filename=filename, local_files_only=True))
+    except Exception:
+        return None
+
+
 def get_languagetool_runtime_status() -> LanguageToolRuntimeStatus:
     """Return whether local LanguageTool assets are available without starting the server."""
     try:
         import language_tool_python
     except ImportError:
-        return LanguageToolRuntimeStatus(False, "language_tool_python is not installed")
+        return LanguageToolRuntimeStatus(False, "language_tool_python is not installed", "missing_package")
     except Exception as exc:
-        return LanguageToolRuntimeStatus(False, f"language_tool_python import failed: {exc}")
+        return LanguageToolRuntimeStatus(False, f"language_tool_python import failed: {exc}", "import_failed")
 
     preferred_lt_dir = _get_preferred_languagetool_dir(language_tool_python)
     if preferred_lt_dir is not None and "LTP_JAR_DIR_PATH" not in os.environ:
@@ -90,15 +129,27 @@ def get_languagetool_runtime_status() -> LanguageToolRuntimeStatus:
     try:
         java_path, jar_path = language_tool_python.utils.get_jar_info()
     except Exception as exc:
-        return LanguageToolRuntimeStatus(False, str(exc))
+        if preferred_lt_dir is None:
+            return LanguageToolRuntimeStatus(
+                False,
+                "LanguageTool assets are not cached yet",
+                "missing_assets",
+            )
+        if not preferred_lt_dir.exists():
+            return LanguageToolRuntimeStatus(
+                False,
+                f"LanguageTool assets missing at {preferred_lt_dir}",
+                "missing_assets",
+            )
+        return LanguageToolRuntimeStatus(False, str(exc), "probe_failed")
 
     jar_root = Path(jar_path)
     java_binary = Path(java_path)
     if not jar_root.exists():
-        return LanguageToolRuntimeStatus(False, f"LanguageTool assets missing at {jar_root}")
+        return LanguageToolRuntimeStatus(False, f"LanguageTool assets missing at {jar_root}", "missing_assets")
     if not java_binary.exists():
-        return LanguageToolRuntimeStatus(False, f"Java runtime missing at {java_binary}")
-    return LanguageToolRuntimeStatus(True, f"Ready at {jar_root}")
+        return LanguageToolRuntimeStatus(False, f"Java runtime missing at {java_binary}", "missing_java")
+    return LanguageToolRuntimeStatus(True, f"Ready at {jar_root}", "ready")
 
 
 def _get_preferred_languagetool_dir(language_tool_python: Any) -> Path | None:
@@ -541,19 +592,14 @@ class GrammarPostProcessor:
             return "LanguageTool"
 
         backend = self.config.backend.lower()
-        gector_error = self._gector_manager.get_error()
-        torch_error = get_torch_import_error()
-        verb_dict_path = get_verb_dictionary_path()
+        gector_status = get_gector_runtime_status(self.config.gector_model)
         lt_status = get_languagetool_runtime_status()
 
         if backend in ("auto", "gector"):
-            if gector_error:
-                if backend == "gector":
-                    return f"Unavailable: {gector_error}"
-            elif verb_dict_path is not None and torch_error is None:
-                return "GECToR (ready on demand)"
-            elif backend == "gector" and torch_error is not None:
-                return "Unavailable: PyTorch unavailable"
+            if gector_status.available:
+                return gector_status.detail
+            if backend == "gector":
+                return gector_status.detail
 
         if backend in ("auto", "languagetool"):
             if lt_status.available:
@@ -561,8 +607,8 @@ class GrammarPostProcessor:
             if backend == "languagetool":
                 return f"Unavailable: {lt_status.detail}"
 
-        if gector_error:
-            return f"Unavailable: {gector_error}"
+        if not gector_status.available:
+            return gector_status.detail
         if backend in ("auto", "languagetool") and not lt_status.available:
             return f"Unavailable: {lt_status.detail}"
         return "No backend available"
@@ -841,6 +887,39 @@ def check_grammar_status(*, lazy: bool = False) -> Tuple[bool, str]:
     status = processor.peek_status() if lazy else processor.get_status()
     is_available = "Unavailable" not in status and status != "Disabled" and status != "No backend available"
     return is_available, status
+
+
+def get_gector_runtime_status(model_id: str) -> GectorRuntimeStatus:
+    """Return whether GECToR can be used lazily without initializing the model."""
+    manager = _GECToRManager.get_instance()
+    if manager.is_available():
+        device = manager.device or "unknown"
+        return GectorRuntimeStatus(True, f"GECToR ({device})", "ready")
+
+    initialization_error = manager.get_error()
+    if initialization_error:
+        return GectorRuntimeStatus(False, f"Unavailable: {initialization_error}", "unavailable")
+
+    if get_verb_dictionary_path() is None:
+        return GectorRuntimeStatus(False, "Unavailable: Verb dictionary unavailable", "unavailable")
+
+    if get_torch_import_error() is not None:
+        return GectorRuntimeStatus(False, "Unavailable: PyTorch unavailable", "unavailable")
+
+    missing_modules = [name for name in ("gector", "transformers", "huggingface_hub") if not _module_available(name)]
+    if missing_modules:
+        return GectorRuntimeStatus(
+            False,
+            f"Unavailable: Missing {', '.join(missing_modules)}",
+            "unavailable",
+        )
+
+    required_files = ("config.json", "pytorch_model.bin")
+    cached_paths = [_resolve_cached_hf_file(model_id, filename) for filename in required_files]
+    if all(path is not None and path.exists() for path in cached_paths):
+        return GectorRuntimeStatus(True, "GECToR (ready on demand)", "ready_on_demand")
+
+    return GectorRuntimeStatus(True, "GECToR (downloads model on demand)", "needs_download")
 
 
 def unload_gector() -> None:

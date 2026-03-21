@@ -203,7 +203,6 @@ class MaterialButton(QtWidgets.QPushButton):
             variant: New variant name.
         """
         self._variant = variant
-        self._glow_effect = None  # Reset glow effect for new variant
         self._apply_style()
 
     def variant(self) -> str:

@@ -148,12 +148,56 @@ These were verified during this audit and should shape the next cleanup pass.
    - there are no direct tests that instantiate `MaterialButton`, `GlassCard`, `ResponsiveSplitter`, or `ThemeManager`
    - reviewer should add focused behavior tests before deleting live GUI abstractions
 
+## Highest-Risk Correctness Findings
+
+These are not just cleanup ideas. They are the strongest verified correctness boundaries for the next review pass.
+
+1. The eager grammar-status path is non-hermetic and can hang or crash verification.
+   - `check_grammar_status()` calls `GrammarPostProcessor.get_status()`, which can initialize real GECToR and LanguageTool state
+   - `python -c "from grammar_postprocessor import check_grammar_status; print(check_grammar_status())"` timed out during this audit
+   - `python -c "from grammar_postprocessor import check_grammar_status; print(check_grammar_status(lazy=True))"` returned immediately
+   - reviewer should make `tests/test_grammar.py` hermetic before trusting any suite result that touches grammar status
+
+2. The lazy grammar-status path can still produce false-positive readiness.
+   - `GrammarPostProcessor.peek_status()` can report `GECToR (ready on demand)` when it only sees a verb dictionary plus no cached torch-import error
+   - it does not prove that `gector`, `transformers`, or the configured model files are actually available
+   - preserve startup laziness, but make the readiness language more honest and add direct tests for the lazy branch
+
+3. Windows DLL-directory handling is a real startup-risk seam.
+   - `app_paths._configure_windows_dll_search_paths()` calls `os.add_dll_directory(...)` and discards the returned handles
+   - `youtube_transcriber.ensure_cuda12_runtime_on_windows()` also calls `os.add_dll_directory(...)` without retaining handles
+   - reviewer should treat DLL search-path lifetime as correctness work, not cosmetic refactor territory
+
+4. URL validation still allows false positives.
+   - `validate_youtube_url()` accepts some URLs that do not actually yield a video ID
+   - reviewer should tighten validation so it stays aligned with `extract_video_id()` instead of allowing a later failure path
+
+5. Filename sanitization is not fully Windows-safe yet.
+   - `sanitize_filename()` does not fully guard reserved basenames with extensions or trailing-dot edge cases
+   - `save_transcript()` depends on this path, so reviewer should harden the sanitization contract before claiming path safety
+
+6. Core transcription flows do not share one error contract.
+   - `download_audio()` swallows typed failures and returns `None`
+   - `transcribe_audio()` catches broadly and returns `(None, None)`
+   - `transcribe_local_file()` raises typed exceptions
+   - reviewer should unify or at least clearly document these contracts before simplifying callers
+
+7. Launcher preflight grammar classification is somewhat brittle.
+   - `launcher_preflight.inspect_language_tool_runtime()` classifies some states by substring-matching upstream error text
+   - keep the user-facing messaging, but avoid pretending this is a stable API boundary
+
+8. There are a few high-confidence janitor targets in the core slice.
+   - `launcher_preflight.VERB_DICT_PATH` is unused
+   - `_WhisperExecutionState.torch_module` is stored but not consumed
+   - `filter_hallucinations()` appears superseded by `_normalize_transcript_segments()` and should only be removed if the public helper surface is intentionally being reduced
+
 ## Do-Not-Break Rules
 
 - `gui_runtime_bootstrap.py` must remain the Windows-safe import path that primes `torch` before `PyQt6`.
 - `runtime_bootstrap.py` remains the single owner of Hugging Face cache env setup.
 - `AppConfig` owns functional settings; `QSettings` is only for Qt UI state.
-- grammar status checks must stay lazy and side-effect free at startup
+- grammar status checks must stay lazy at startup and must not instantiate GECToR or a real LanguageTool server just to paint UI status
+- treat LanguageTool runtime probing carefully: the current helper is lighter than full startup, but it still mutates `LTP_JAR_DIR_PATH`
 - typed transcript normalization from `transcript_types.py` must stay consistent across YouTube, local-file, and recording flows
 - packaged and source runs must keep equivalent startup behavior
 
@@ -164,30 +208,38 @@ Work in this order. Do not skip the first pass.
 1. Restore a trustworthy verification loop.
    - fix the combined `pytest` hang first
    - likely starting point: make `tests/test_app_paths.py` fully restore env mutations and make `tests/test_grammar.py` hermetic around `check_grammar_status()`
+   - explicitly separate eager grammar-status tests from lazy grammar-status tests
    - after the fix, rerun full `pytest`
 
-2. Remove or fully wire dormant config surface.
+2. Harden correctness boundaries that create false positives or flaky runtime behavior.
+   - retain Windows DLL-directory handles in the startup/runtime paths
+   - align `validate_youtube_url()` with `extract_video_id()`
+   - harden `sanitize_filename()` and the save path contract on Windows
+   - make grammar readiness/status reporting honest without reintroducing eager startup
+   - decide whether to unify or explicitly preserve the current error contracts across the three transcription flows
+
+3. Remove or fully wire dormant config surface.
    - decide whether `UIConfig` really owns theme/accent/window geometry/splitter ratios
    - if yes, wire them into the GUI and drop the overlapping `QSettings` usage only where appropriate
    - if no, prune the dead fields and update serialization/tests/docs together
 
-3. Shrink dormant GUI/theme/widget surface.
+4. Shrink dormant GUI/theme/widget surface.
    - validate unused widget helpers with Auggie plus exact search
    - remove unused loading indicators/theme hooks only when no product/design plan depends on them
    - keep the live Material-card/button/splitter path intact
    - simplify overlapping animation systems before deleting the live card widgets themselves
    - check whether `normalize_audio` should be merged into the live checkbox model or surfaced separately
 
-4. Align docs with actual runtime behavior.
+5. Align docs with actual runtime behavior.
    - document the CLI if the repo is going to keep calling itself CLI-capable
    - document real log/config/cache locations
    - document that `-IncludeCachedModels` depends on the configured/cached model set on the build machine
 
-5. Harden packaging parity.
+6. Harden packaging parity.
    - make sure `run_gui.bat`, `build_standalone.ps1`, `build_cache_manifest.py`, and `youtube_transcriber.spec` still describe the same startup/runtime model
    - add focused tests where practical, especially for script-generated assumptions
 
-6. Only after the above, widen into core simplification.
+7. Only after the above, widen into core simplification.
    - use Auggie to look for duplication in Whisper setup, config snapshotting, grammar fallback, and queue message handling
    - remove overlapping implementation only with regression coverage in place
 
@@ -200,6 +252,8 @@ These are the best janitor targets because they are confirmed by exact search, n
 - `ThemeManager.get_glass_card_style()` and `ThemeManager.get_glow_color()` with no callsites
 - unused loading-indicator widgets: `SpinnerRing`, `ProcessingOverlay`, `RecordingPulse`
 - dangling `MaterialButton.setVariant()` `_glow_effect` reset with no implemented glow system
+- unused `launcher_preflight.VERB_DICT_PATH`
+- unused `_WhisperExecutionState.torch_module`
 - stale "no skill required" guidance from the previous version of this plan
 - README CLI/documentation drift
 - launcher messaging that implies logs always live beside the batch file
@@ -213,6 +267,8 @@ These need intent checks before deletion.
 - dormant theme-selection config fields that may represent an abandoned roadmap rather than pure clutter
 - `ResponsiveSplitter` breakpoint-related API surface that currently has no external consumers
 - separate `normalize_audio` config that is always driven by the noise-reduction checkbox
+- repo-level helper `filter_hallucinations()` if the public helper surface is intentionally being reduced
+- inconsistent error-handling shape across `download_audio()`, `transcribe_audio()`, and `transcribe_local_file()`
 - any packaging helper that looks redundant but is preserving bundled/source parity on Windows
 
 ## Low-Confidence Or Preserve-By-Default Areas
@@ -232,6 +288,8 @@ Verification blocker:
 - `tests/test_grammar.py`
 - `app_paths.py`
 - `grammar_postprocessor.py`
+- `youtube_transcriber.py`
+- `launcher_preflight.py`
 
 Dormant config/theme surface:
 

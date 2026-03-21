@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import numpy as np
@@ -17,7 +18,11 @@ class TestReduceNoiseArray:
 
     def test_returns_same_shape(self):
         audio = np.random.randn(16000).astype(np.float32)
-        result = reduce_noise_array(audio, sample_rate=16000)
+        fake_module = SimpleNamespace(reduce_noise=lambda **kwargs: kwargs["y"] * 0.5)
+
+        with patch.dict("sys.modules", {"noisereduce": fake_module}):
+            result = reduce_noise_array(audio, sample_rate=16000)
+
         assert result.shape == audio.shape
         assert result.dtype == np.float32
 
@@ -41,13 +46,17 @@ class TestPreprocessArray:
             noise_reduction=False,
             normalize=False,
         )
-        np.testing.assert_array_equal(result, audio)
+        assert np.array_equal(result, audio)
 
     def test_noise_reduction_only(self):
         audio = np.random.randn(16000).astype(np.float32)
-        result = preprocess_array(
-            audio,
-            noise_reduction=True,
-            normalize=False,
-        )
+        fake_module = SimpleNamespace(reduce_noise=lambda **kwargs: kwargs["y"] * 0.5)
+
+        with patch.dict("sys.modules", {"noisereduce": fake_module}):
+            result = preprocess_array(
+                audio,
+                noise_reduction=True,
+                normalize=False,
+            )
+
         assert result.shape == audio.shape

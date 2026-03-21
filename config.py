@@ -61,12 +61,6 @@ class RecordingConfig:
 class UIConfig:
     """Configuration for UI settings."""
 
-    theme: str = "dark"
-    accent_color: str = "blue"
-    window_width: int = 1280
-    window_height: int = 1024
-    splitter_ratios: tuple[float, float, float] = (0.4, 0.2, 0.4)
-    remember_window_position: bool = True
     last_youtube_url: str = ""
     output_format: str = "plain"
     transcription_preset: str = "max_accuracy"
@@ -205,7 +199,7 @@ class AppConfig:
         data = {
             "transcription": asdict(self.transcription),
             "recording": asdict(self.recording),
-            "ui": {**asdict(self.ui), "splitter_ratios": list(self.ui.splitter_ratios)},
+            "ui": asdict(self.ui),
             "grammar": asdict(self.grammar),
             "gpu_memory_fraction": self.gpu_memory_fraction,
             "max_audio_size_mb": self.max_audio_size_mb,
@@ -307,14 +301,7 @@ class AppConfig:
             # Load UI settings
             if "ui" in data:
                 u = data["ui"]
-                ratios = u.get("splitter_ratios", [0.4, 0.2, 0.4])
                 config.ui = UIConfig(
-                    theme=u.get("theme", "dark"),
-                    accent_color=u.get("accent_color", "blue"),
-                    window_width=u.get("window_width", 1280),
-                    window_height=u.get("window_height", 1024),
-                    splitter_ratios=tuple(ratios) if isinstance(ratios, list) else ratios,
-                    remember_window_position=u.get("remember_window_position", True),
                     last_youtube_url=u.get("last_youtube_url", ""),
                     output_format=u.get("output_format", "plain"),
                     transcription_preset=u.get("transcription_preset", "max_accuracy"),
