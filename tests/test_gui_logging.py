@@ -115,6 +115,60 @@ def test_queue_handler_terminates_each_log_record_with_newline() -> None:
     assert target_queue.empty()
 
 
+def test_setup_backend_logging_for_gui_reuses_one_file_handler(monkeypatch, tmp_path) -> None:
+    """Backend GUI logging should not create competing rotating handlers for one file."""
+    logger_names = ("tmp-backend-a", "tmp-backend-b", "tmp-backend-c")
+    logger_levels = {name: logging.INFO for name in logger_names}
+    log_path = tmp_path / "youtube_transcriber.log"
+    created_handlers: list[logging.Handler] = []
+
+    class DummyFileHandler(logging.Handler):
+        def __init__(self, base_filename: str) -> None:
+            super().__init__()
+            self.baseFilename = base_filename
+
+        def emit(self, record: logging.LogRecord) -> None:
+            return None
+
+    original_logger_state = {
+        name: (logging.getLogger(name).handlers[:], logging.getLogger(name).level)
+        for name in logger_names
+    }
+
+    monkeypatch.setattr(gt, "BACKEND_LOGGER_LEVELS", logger_levels)
+    monkeypatch.setattr(gt, "_backend_file_handler", None)
+    monkeypatch.setattr(gt, "get_log_path", lambda _: log_path)
+
+    def _build_handler(_: str) -> logging.Handler:
+        handler = DummyFileHandler(str(log_path))
+        created_handlers.append(handler)
+        return handler
+
+    monkeypatch.setattr(gt, "_build_rotating_file_handler", _build_handler)
+
+    try:
+        for logger_name in logger_names:
+            logger_obj = logging.getLogger(logger_name)
+            logger_obj.handlers.clear()
+            logger_obj.setLevel(logging.NOTSET)
+
+        gt.setup_backend_logging_for_gui()
+        gt.setup_backend_logging_for_gui()
+
+        assert len(created_handlers) == 1
+        shared_handler = created_handlers[0]
+        for logger_name in logger_names:
+            logger_obj = logging.getLogger(logger_name)
+            assert logger_obj.level == logging.INFO
+            assert logger_obj.handlers.count(shared_handler) == 1
+    finally:
+        for logger_name in logger_names:
+            logger_obj = logging.getLogger(logger_name)
+            handlers, level = original_logger_state[logger_name]
+            logger_obj.handlers[:] = handlers
+            logger_obj.setLevel(level)
+
+
 def _build_fake_gui() -> Any:
     """Create a lightweight stand-in for TranscriberGUI worker-thread tests."""
     return cast(
@@ -171,6 +225,36 @@ def test_youtube_thread_does_not_duplicate_snapshot_when_grammar_fails(monkeypat
     )
 
 
+def test_youtube_thread_emits_only_final_snapshot_after_successful_grammar(monkeypatch) -> None:
+    """Successful grammar correction should only publish the corrected final snapshot."""
+    fake_gui = _build_fake_gui()
+    raw_segments = [make_transcript_segment(start=0.0, end=1.0, text="raw transcript")]
+    fixed_segments = [make_transcript_segment(start=0.0, end=1.0, text="fixed transcript")]
+
+    monkeypatch.setattr(gt, "_attach_worker_queue_logging", lambda target_queue: (gt.QueueHandler(target_queue), []))
+    monkeypatch.setattr(gt, "_detach_worker_queue_logging", lambda queue_handler, logger_states: None)
+    monkeypatch.setattr(gt, "validate_youtube_url", lambda url: (True, ""))
+    monkeypatch.setattr(gt, "extract_video_id", lambda url: "video123")
+    monkeypatch.setattr(gt, "get_youtube_transcript", lambda video_id: ("raw transcript", list(raw_segments)))
+    monkeypatch.setattr(
+        gt,
+        "post_process_grammar",
+        lambda **kwargs: ("fixed transcript", list(fixed_segments), True),
+    )
+
+    TranscriberGUI.transcribe_youtube_thread(
+        fake_gui,
+        "https://youtube.com/watch?v=video123",
+        "plain",
+        TranscriptionConfig(),
+        GrammarConfig(enabled=True),
+    )
+
+    messages = _drain_queue(fake_gui.output_queue)
+    assert [message for message in messages if message[0] == "transcript"] == [("transcript", "fixed transcript")]
+    assert [message for message in messages if message[0] == "segments"] == [("segments", fixed_segments)]
+
+
 def test_local_file_thread_does_not_duplicate_snapshot_when_grammar_fails(monkeypatch) -> None:
     """Local-file grammar failures should not resend identical transcript data."""
     fake_gui = _build_fake_gui()
@@ -209,3 +293,37 @@ def test_local_file_thread_does_not_duplicate_snapshot_when_grammar_fails(monkey
         message[0] == "progress" and "Grammar correction skipped: boom" in cast(str, message[1])
         for message in messages
     )
+
+
+def test_local_file_thread_emits_only_final_snapshot_after_successful_grammar(monkeypatch) -> None:
+    """Successful local-file grammar correction should only publish the corrected result."""
+    fake_gui = _build_fake_gui()
+    raw_segments = [make_transcript_segment(start=0.0, end=1.0, text="raw transcript")]
+    fixed_segments = [make_transcript_segment(start=0.0, end=1.0, text="fixed transcript")]
+
+    monkeypatch.setattr(gt, "_attach_worker_queue_logging", lambda target_queue: (gt.QueueHandler(target_queue), []))
+    monkeypatch.setattr(gt, "_detach_worker_queue_logging", lambda queue_handler, logger_states: None)
+    monkeypatch.setattr(gt, "unload_gector", lambda: None)
+    monkeypatch.setattr(gt, "get_torch", lambda *args, **kwargs: None)
+    monkeypatch.setattr(gt, "find_ffmpeg", lambda: "ffmpeg")
+    monkeypatch.setattr(
+        gt,
+        "transcribe_local_file",
+        lambda **kwargs: ("raw transcript", list(raw_segments)),
+    )
+    monkeypatch.setattr(
+        gt,
+        "post_process_grammar",
+        lambda **kwargs: ("fixed transcript", list(fixed_segments), True),
+    )
+
+    TranscriberGUI.transcribe_local_file_thread(
+        fake_gui,
+        "sample.wav",
+        TranscriptionConfig(),
+        GrammarConfig(enabled=True),
+    )
+
+    messages = _drain_queue(fake_gui.output_queue)
+    assert [message for message in messages if message[0] == "transcript"] == [("transcript", "fixed transcript")]
+    assert [message for message in messages if message[0] == "segments"] == [("segments", fixed_segments)]

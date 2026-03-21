@@ -88,6 +88,9 @@ BACKEND_LOGGER_LEVELS: dict[str, int] = {
     "grammar_postprocessor": logging.INFO,
     "faster_whisper": logging.INFO,
 }
+BACKEND_LOG_NAME = "youtube_transcriber.log"
+
+_backend_file_handler: RotatingFileHandler | None = None
 
 
 class QueueLogger(StringIO):
@@ -178,6 +181,14 @@ def _build_rotating_file_handler(log_name: str) -> RotatingFileHandler:
     return file_handler
 
 
+def _get_backend_file_handler() -> RotatingFileHandler:
+    """Reuse one rotating handler for the shared backend log file."""
+    global _backend_file_handler
+    if _backend_file_handler is None:
+        _backend_file_handler = _build_rotating_file_handler(BACKEND_LOG_NAME)
+    return _backend_file_handler
+
+
 def _logger_has_handler_for_path(logger_obj: logging.Logger, log_path: Path) -> bool:
     """Return whether the logger already writes to the given file path."""
     target = str(log_path.resolve())
@@ -196,12 +207,13 @@ def _logger_has_handler_for_path(logger_obj: logging.Logger, log_path: Path) -> 
 
 def setup_backend_logging_for_gui() -> None:
     """Ensure backend modules write detailed logs when launched from the GUI."""
-    backend_log_path = get_log_path("youtube_transcriber.log")
+    backend_log_path = get_log_path(BACKEND_LOG_NAME)
+    shared_handler = _get_backend_file_handler()
     for logger_name, level in BACKEND_LOGGER_LEVELS.items():
         logger_obj = logging.getLogger(logger_name)
         logger_obj.setLevel(level)
         if not _logger_has_handler_for_path(logger_obj, backend_log_path):
-            logger_obj.addHandler(_build_rotating_file_handler("youtube_transcriber.log"))
+            logger_obj.addHandler(shared_handler)
 
     logging.getLogger("yt_dlp").setLevel(logging.WARNING)
 
@@ -1180,13 +1192,6 @@ class TranscriberGUI(QtWidgets.QMainWindow):
                 return
 
             if transcript:
-                if output_format == "timestamped" and segments_data:
-                    formatted_transcript = format_transcript_with_timestamps(segments_data)
-                    self.output_queue.put(("transcript", formatted_transcript))
-                else:
-                    self.output_queue.put(("transcript", transcript))
-                self.output_queue.put(("segments", segments_data if segments_data else []))
-
                 # Grammar Post-Processing (if enabled)
                 grammar_enhanced = False
                 if grammar_config.enabled:
@@ -1203,15 +1208,16 @@ class TranscriberGUI(QtWidgets.QMainWindow):
                             self.output_queue.put(("progress", "Grammar correction applied successfully.\n"))
                         else:
                             self.output_queue.put(("progress", "Grammar: No changes needed or unavailable.\n"))
-                        if output_format == "timestamped" and segments_data:
-                            formatted_transcript = format_transcript_with_timestamps(segments_data)
-                            self.output_queue.put(("transcript", formatted_transcript))
-                        else:
-                            self.output_queue.put(("transcript", transcript))
-                        self.output_queue.put(("segments", segments_data if segments_data else []))
                     except Exception as grammar_exc:
                         gui_logger.warning(f"Grammar correction failed: {grammar_exc}")
                         self.output_queue.put(("progress", f"Grammar correction skipped: {grammar_exc}\n"))
+
+                if output_format == "timestamped" and segments_data:
+                    formatted_transcript = format_transcript_with_timestamps(segments_data)
+                    self.output_queue.put(("transcript", formatted_transcript))
+                else:
+                    self.output_queue.put(("transcript", transcript))
+                self.output_queue.put(("segments", segments_data if segments_data else []))
 
                 status_msg = "Transcription complete!"
                 if grammar_enhanced:
@@ -1323,9 +1329,6 @@ class TranscriberGUI(QtWidgets.QMainWindow):
             )
 
             if transcript.strip():
-                self.output_queue.put(("segments", segments_data))
-                self.output_queue.put(("transcript", transcript))
-
                 grammar_enhanced = False
                 if grammar_config.enabled:
                     self.output_queue.put(("status", "Applying grammar corrections...", self.theme.colors.warning))
@@ -1340,11 +1343,12 @@ class TranscriberGUI(QtWidgets.QMainWindow):
                             self.output_queue.put(("progress", "Grammar correction applied.\n"))
                         else:
                             self.output_queue.put(("progress", "Grammar: No changes needed or unavailable.\n"))
-                        self.output_queue.put(("segments", segments_data))
-                        self.output_queue.put(("transcript", transcript))
                     except Exception as grammar_exc:
                         gui_logger.warning(f"Grammar correction failed: {grammar_exc}")
                         self.output_queue.put(("progress", f"Grammar correction skipped: {grammar_exc}\n"))
+
+                self.output_queue.put(("segments", segments_data))
+                self.output_queue.put(("transcript", transcript))
 
                 status_msg = "Transcription complete!"
                 if segments_data:
