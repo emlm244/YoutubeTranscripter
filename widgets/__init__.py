@@ -1,4 +1,4 @@
-"""Modern UI widgets for YouTube Transcriber.
+"""Modern UI widgets for the transcription app.
 
 Provides glassmorphism cards, material buttons, and animated components.
 """

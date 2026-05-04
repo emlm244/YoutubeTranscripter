@@ -291,7 +291,7 @@ def test_correct_runtime_oom_when_empty_cache_fails(monkeypatch):
         manager.correct(["hello"])
 
 
-def test_correct_generic_exception_returns_original(monkeypatch):
+def test_correct_generic_exception_raises_runtime_error(monkeypatch):
     monkeypatch.setitem(
         sys.modules,
         "gector",
@@ -303,11 +303,12 @@ def test_correct_generic_exception_returns_original(monkeypatch):
     manager.tokenizer = object()
     manager.encode = {}
     manager.decode = {}
-    assert manager.correct(["hello"]) == ["hello"]
+    with pytest.raises(RuntimeError, match="GECToR correction failed: other"):
+        manager.correct(["hello"])
 
 
 def test_process_text_fallback_to_languagetool(monkeypatch):
-    processor = gp.GrammarPostProcessor(GrammarConfig(backend="auto"))
+    processor = gp.GrammarPostProcessor(GrammarConfig(enabled=True, backend="auto"))
     processor._active_backend = "gector"
     monkeypatch.setattr(processor, "_correct_with_gector", lambda _text: (_ for _ in ()).throw(RuntimeError("fail")))
     monkeypatch.setattr(gp, "_get_languagetool", lambda _lang: object())
@@ -318,7 +319,7 @@ def test_process_text_fallback_to_languagetool(monkeypatch):
 
 
 def test_process_text_no_backend(monkeypatch):
-    processor = gp.GrammarPostProcessor(GrammarConfig(backend="gector"))
+    processor = gp.GrammarPostProcessor(GrammarConfig(enabled=True, backend="gector"))
     monkeypatch.setattr(processor, "_ensure_backend", lambda: False)
     out_text, enhanced = processor.process_text("hello")
     assert out_text == "hello"
@@ -326,7 +327,7 @@ def test_process_text_no_backend(monkeypatch):
 
 
 def test_process_text_languagetool_path(monkeypatch):
-    processor = gp.GrammarPostProcessor(GrammarConfig(backend="languagetool"))
+    processor = gp.GrammarPostProcessor(GrammarConfig(enabled=True, backend="languagetool"))
     processor._active_backend = "languagetool"
     monkeypatch.setattr(processor, "_correct_with_languagetool", lambda text: (f"{text} lt", True))
     out_text, enhanced = processor.process_text("hello")
@@ -335,7 +336,7 @@ def test_process_text_languagetool_path(monkeypatch):
 
 
 def test_process_text_fallback_failure_returns_original(monkeypatch):
-    processor = gp.GrammarPostProcessor(GrammarConfig(backend="auto"))
+    processor = gp.GrammarPostProcessor(GrammarConfig(enabled=True, backend="auto"))
     processor._active_backend = "gector"
     monkeypatch.setattr(processor, "_correct_with_gector", lambda _text: (_ for _ in ()).throw(RuntimeError("fail")))
     monkeypatch.setattr(gp, "_get_languagetool", lambda _lang: object())
@@ -350,7 +351,7 @@ def test_process_text_fallback_failure_returns_original(monkeypatch):
 
 
 def test_process_segments_fallback_to_languagetool(monkeypatch):
-    processor = gp.GrammarPostProcessor(GrammarConfig(backend="auto"))
+    processor = gp.GrammarPostProcessor(GrammarConfig(enabled=True, backend="auto"))
     processor._active_backend = "gector"
     sample = [{"start": 0, "end": 1, "text": "hello"}]
     monkeypatch.setattr(processor, "_process_segments_gector", lambda _data: (_ for _ in ()).throw(RuntimeError("fail")))
@@ -362,7 +363,7 @@ def test_process_segments_fallback_to_languagetool(monkeypatch):
 
 
 def test_process_segments_no_backend(monkeypatch):
-    processor = gp.GrammarPostProcessor(GrammarConfig(backend="gector"))
+    processor = gp.GrammarPostProcessor(GrammarConfig(enabled=True, backend="gector"))
     monkeypatch.setattr(processor, "_ensure_backend", lambda: False)
     sample = [{"start": 0, "end": 1, "text": "hello"}]
     out, enhanced = processor.process_segments(sample)
@@ -371,7 +372,7 @@ def test_process_segments_no_backend(monkeypatch):
 
 
 def test_process_segments_languagetool_direct_path(monkeypatch):
-    processor = gp.GrammarPostProcessor(GrammarConfig(backend="languagetool"))
+    processor = gp.GrammarPostProcessor(GrammarConfig(enabled=True, backend="languagetool"))
     processor._active_backend = "languagetool"
     sample = [{"start": 0, "end": 1, "text": "hello"}]
     monkeypatch.setattr(processor, "_process_segments_languagetool", lambda data: (data, True))
@@ -381,7 +382,7 @@ def test_process_segments_languagetool_direct_path(monkeypatch):
 
 
 def test_process_segments_fallback_failure_returns_original(monkeypatch):
-    processor = gp.GrammarPostProcessor(GrammarConfig(backend="auto"))
+    processor = gp.GrammarPostProcessor(GrammarConfig(enabled=True, backend="auto"))
     processor._active_backend = "gector"
     sample = [{"start": 0, "end": 1, "text": "hello"}]
     monkeypatch.setattr(processor, "_process_segments_gector", lambda _data: (_ for _ in ()).throw(RuntimeError("fail")))
@@ -490,7 +491,7 @@ def test_process_segments_languagetool_no_tool_and_exception(monkeypatch):
 
 
 def test_split_sentences_and_correct_with_gector(monkeypatch):
-    processor = gp.GrammarPostProcessor(GrammarConfig(gector_batch_size=2, gector_iterations=3))
+    processor = gp.GrammarPostProcessor(GrammarConfig(enabled=True, gector_batch_size=2, gector_iterations=3))
     processor._gector_manager = types.SimpleNamespace(correct=lambda texts, **_kwargs: ["ok 1", "ok 2"])
     assert processor._split_sentences("One. Two?") == ["One.", "Two?"]
     out_text, enhanced = processor._correct_with_gector("One. Two?")
@@ -504,13 +505,13 @@ def test_ensure_backend_and_status_paths(monkeypatch):
         get_error=lambda: "boom",
         device="cpu",
     )
-    processor = gp.GrammarPostProcessor(GrammarConfig(backend="gector"))
+    processor = gp.GrammarPostProcessor(GrammarConfig(enabled=True, backend="gector"))
     processor._gector_manager = manager
     assert processor._ensure_backend() is False
     assert processor.is_available() is False
     assert processor.get_status() == "Unavailable: boom"
 
-    processor2 = gp.GrammarPostProcessor(GrammarConfig(backend="auto"))
+    processor2 = gp.GrammarPostProcessor(GrammarConfig(enabled=True, backend="auto"))
     processor2._gector_manager = manager
     monkeypatch.setattr(gp, "_get_languagetool", lambda _lang: object())
     assert processor2._ensure_backend() is True
@@ -520,7 +521,7 @@ def test_ensure_backend_and_status_paths(monkeypatch):
 def test_post_process_and_status_helpers(monkeypatch):
     monkeypatch.setattr(gp.GrammarPostProcessor, "process_text", lambda self, text: (f"{text} ok", True))
     monkeypatch.setattr(gp.GrammarPostProcessor, "process_segments", lambda self, segs: (segs, False))
-    text, segments, enhanced = gp.post_process_grammar("hi", None, GrammarConfig())
+    text, segments, enhanced = gp.post_process_grammar("hi", None, GrammarConfig(enabled=True))
     assert text == "hi ok"
     assert segments is None
     assert enhanced is True
@@ -528,7 +529,7 @@ def test_post_process_and_status_helpers(monkeypatch):
     out_text, out_segments, out_enhanced = gp.post_process_grammar(
         text="ignored",
         segments_data=[{"start": 0, "end": 1, "text": "a"}],
-        config=GrammarConfig(),
+        config=GrammarConfig(enabled=True),
     )
     assert out_text == "a"
     assert out_segments is not None
@@ -562,6 +563,7 @@ def test_load_gector_model_with_mocks(tmp_path, monkeypatch):
                 "has_add_pooling_layer": True,
                 "num_labels": 4,
                 "d_num_labels": 3,
+                "max_length": 96,
                 "p_dropout": 0.1,
                 "label_smoothing": 0.0,
             }
@@ -580,7 +582,7 @@ def test_load_gector_model_with_mocks(tmp_path, monkeypatch):
 
     class _FakeAutoTokenizer:
         @staticmethod
-        def from_pretrained(_model_id):
+        def from_pretrained(_model_id, **_kwargs):
             return object()
 
     class _FakeBert:
@@ -650,9 +652,162 @@ def test_load_gector_model_with_mocks(tmp_path, monkeypatch):
         sys.modules,
         "huggingface_hub",
         types.SimpleNamespace(
-            hf_hub_download=lambda repo_id, filename: str(config_path if filename == "config.json" else model_path)
+            hf_hub_download=lambda repo_id, filename, local_files_only=False: str(
+                config_path if filename == "config.json" else model_path
+            )
         ),
     )
 
     model = gp._load_gector_model("fake/model")
     assert model is not None
+    assert model.config.max_length == 96
+
+
+def test_load_gector_model_prefers_cached_local_dirs(tmp_path, monkeypatch):
+    gector_dir = tmp_path / "gector-cache"
+    backbone_dir = tmp_path / "backbone-cache"
+    gector_dir.mkdir()
+    backbone_dir.mkdir()
+    (gector_dir / "config.json").write_text(
+        json.dumps(
+            {
+                "model_id": "roberta-large",
+                "has_add_pooling_layer": False,
+                "num_labels": 4,
+                "d_num_labels": 3,
+                "max_length": 96,
+                "p_dropout": 0.1,
+                "label_smoothing": 0.0,
+            }
+        ),
+        encoding="utf-8",
+    )
+    (gector_dir / "pytorch_model.bin").write_text("bin", encoding="utf-8")
+
+    class _FakeConfig:
+        def __init__(self, **kwargs):
+            self.__dict__.update(kwargs)
+
+    class _FakePreTrainedModel:
+        def __init__(self, _config):
+            return None
+
+    tokenizer_calls: list[tuple[str, bool]] = []
+    model_calls: list[tuple[str, bool]] = []
+
+    class _FakeAutoTokenizer:
+        @staticmethod
+        def from_pretrained(model_id, **kwargs):
+            tokenizer_calls.append((str(model_id), bool(kwargs.get("local_files_only"))))
+            return object()
+
+    class _FakeBert:
+        def __init__(self):
+            self.config = types.SimpleNamespace(vocab_size=10, hidden_size=16)
+
+        def resize_token_embeddings(self, *_args, **_kwargs):
+            return None
+
+    class _FakeAutoModel:
+        @staticmethod
+        def from_pretrained(model_id, **kwargs):
+            model_calls.append((str(model_id), bool(kwargs.get("local_files_only"))))
+            return _FakeBert()
+
+    class _FakeTorchNN:
+        @staticmethod
+        def Linear(*_args, **_kwargs):
+            return object()
+
+        @staticmethod
+        def Dropout(*_args, **_kwargs):
+            return object()
+
+    monkeypatch.setitem(
+        sys.modules,
+        "torch",
+        types.SimpleNamespace(
+            nn=_FakeTorchNN(),
+            load=lambda *_args, **_kwargs: {"weights": 1},
+        ),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "torch.nn",
+        types.SimpleNamespace(
+            Linear=_FakeTorchNN.Linear,
+            Dropout=_FakeTorchNN.Dropout,
+            CrossEntropyLoss=lambda **_kwargs: object(),
+        ),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "gector",
+        types.SimpleNamespace(
+            GECToR=type(
+                "FakeGECToR",
+                (),
+                {
+                    "post_init": lambda self: None,
+                    "tune_bert": lambda self, *_args, **_kwargs: None,
+                    "load_state_dict": lambda self, *_args, **_kwargs: None,
+                },
+            ),
+            GECToRConfig=_FakeConfig,
+        ),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "transformers",
+        types.SimpleNamespace(
+            AutoModel=_FakeAutoModel,
+            AutoTokenizer=_FakeAutoTokenizer,
+            PreTrainedModel=_FakePreTrainedModel,
+        ),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "huggingface_hub",
+        types.SimpleNamespace(
+            hf_hub_download=lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("hub download not expected"))
+        ),
+    )
+    monkeypatch.setattr(gp, "_resolve_cached_gector_repo_dir", lambda _model_id: gector_dir)
+    monkeypatch.setattr(gp, "_resolve_cached_transformer_repo_dir", lambda _repo_id: backbone_dir)
+
+    model = gp._load_gector_model("fake/model")
+
+    assert model is not None
+    assert tokenizer_calls == [(str(backbone_dir), True)]
+    assert model_calls == [(str(backbone_dir), True)]
+
+
+def test_get_gector_runtime_status_requires_backbone_cache(tmp_path, monkeypatch):
+    gector_dir = tmp_path / "gector-cache"
+    gector_dir.mkdir()
+    (gector_dir / "config.json").write_text(json.dumps({"model_id": "roberta-large"}), encoding="utf-8")
+
+    class _Manager:
+        device = None
+
+        @staticmethod
+        def is_available():
+            return False
+
+        @staticmethod
+        def get_error():
+            return None
+
+    monkeypatch.setattr(gp._GECToRManager, "get_instance", classmethod(lambda cls: _Manager()))
+    monkeypatch.setattr(gp, "get_verb_dictionary_path", lambda: tmp_path / "verb-form-vocab.txt")
+    monkeypatch.setattr(gp, "get_torch_import_error", lambda: None)
+    monkeypatch.setattr(gp, "_module_available", lambda _name: True)
+    monkeypatch.setattr(gp, "_resolve_cached_gector_repo_dir", lambda _model_id: gector_dir)
+    monkeypatch.setattr(gp, "_resolve_cached_transformer_repo_dir", lambda _repo_id: None)
+
+    needs_download = gp.get_gector_runtime_status("fake/model")
+    assert needs_download.state == "needs_download"
+
+    monkeypatch.setattr(gp, "_resolve_cached_transformer_repo_dir", lambda _repo_id: tmp_path / "backbone-cache")
+    ready = gp.get_gector_runtime_status("fake/model")
+    assert ready.state == "ready_on_demand"

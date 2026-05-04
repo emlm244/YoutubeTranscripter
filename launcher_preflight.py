@@ -3,13 +3,34 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
 from pathlib import Path
 from typing import Literal
 
-from config import AppConfig, get_config
+from config import AppConfig, get_config, get_whisper_models_for_runtime
 from grammar_postprocessor import get_languagetool_runtime_status, get_verb_dictionary_path
 
-REALTIME_MODEL_NAME = "distil-large-v3"
+# Derived from faster_whisper.utils._MODELS to avoid relying on that private API directly.
+# Re-sync FASTER_WHISPER_MODEL_REPOS when future faster-whisper releases add or rename models.
+FASTER_WHISPER_MODEL_REPOS = {
+    "base": "Systran/faster-whisper-base",
+    "base.en": "Systran/faster-whisper-base.en",
+    "distil-large-v2": "Systran/faster-distil-whisper-large-v2",
+    "distil-large-v3": "Systran/faster-distil-whisper-large-v3",
+    "distil-large-v3.5": "distil-whisper/distil-large-v3.5-ct2",
+    "distil-medium.en": "Systran/faster-distil-whisper-medium.en",
+    "distil-small.en": "Systran/faster-distil-whisper-small.en",
+    "large": "Systran/faster-whisper-large-v3",
+    "large-v1": "Systran/faster-whisper-large-v1",
+    "large-v2": "Systran/faster-whisper-large-v2",
+    "large-v3": "Systran/faster-whisper-large-v3",
+    "medium": "Systran/faster-whisper-medium",
+    "medium.en": "Systran/faster-whisper-medium.en",
+    "small": "Systran/faster-whisper-small",
+    "small.en": "Systran/faster-whisper-small.en",
+    "tiny": "Systran/faster-whisper-tiny",
+    "tiny.en": "Systran/faster-whisper-tiny.en",
+}
 
 
 @dataclass(frozen=True)
@@ -31,10 +52,9 @@ def _bootstrap_runtime_environment() -> None:
 def resolve_whisper_model_from_cache(model_name: str) -> Path:
     """Resolve a faster-whisper model from the local cache only."""
     _bootstrap_runtime_environment()
-    from faster_whisper.utils import _MODELS as faster_whisper_models
     from huggingface_hub import try_to_load_from_cache
 
-    repo_id = model_name if "/" in model_name else faster_whisper_models.get(model_name)
+    repo_id = model_name if "/" in model_name else FASTER_WHISPER_MODEL_REPOS.get(model_name)
     if repo_id is None:
         raise ValueError(f"Unknown Whisper model: {model_name}")
 
@@ -55,6 +75,32 @@ def resolve_hf_file_from_cache(repo_id: str, filename: str) -> Path:
         raise FileNotFoundError(f"{repo_id}:{filename}")
 
     return Path(cached_file)
+
+
+def _resolve_any_hf_file_from_cache(repo_id: str, filenames: tuple[str, ...]) -> Path:
+    last_error: FileNotFoundError | None = None
+    for filename in filenames:
+        try:
+            return resolve_hf_file_from_cache(repo_id, filename)
+        except FileNotFoundError as exc:
+            last_error = exc
+    raise last_error or FileNotFoundError(f"{repo_id}:{'|'.join(filenames)}")
+
+
+def _resolve_transformer_model_from_cache(repo_id: str) -> Path:
+    """Resolve a transformer repo cache including config, weights, and tokenizer."""
+    config_path = resolve_hf_file_from_cache(repo_id, "config.json")
+    resolve_hf_file_from_cache(repo_id, "tokenizer_config.json")
+
+    try:
+        resolve_hf_file_from_cache(repo_id, "tokenizer.json")
+    except FileNotFoundError:
+        resolve_hf_file_from_cache(repo_id, "vocab.json")
+        resolve_hf_file_from_cache(repo_id, "merges.txt")
+
+    _resolve_any_hf_file_from_cache(repo_id, ("model.safetensors", "pytorch_model.bin"))
+
+    return config_path.parent
 
 
 def inspect_whisper_model(model_name: str) -> PreflightItem:
@@ -82,10 +128,18 @@ def inspect_whisper_model(model_name: str) -> PreflightItem:
 def inspect_gector_model(model_id: str) -> PreflightItem:
     """Report whether the configured GECToR model files are already cached."""
     label = f"Grammar model '{model_id}'"
-    required_files = ("config.json", "pytorch_model.bin")
 
     try:
-        cached_paths = [resolve_hf_file_from_cache(model_id, filename) for filename in required_files]
+        cached_paths = [
+            resolve_hf_file_from_cache(model_id, "config.json"),
+            _resolve_any_hf_file_from_cache(model_id, ("model.safetensors", "pytorch_model.bin")),
+            resolve_hf_file_from_cache(model_id, "tokenizer_config.json"),
+        ]
+        try:
+            resolve_hf_file_from_cache(model_id, "tokenizer.json")
+        except FileNotFoundError:
+            resolve_hf_file_from_cache(model_id, "vocab.json")
+            resolve_hf_file_from_cache(model_id, "merges.txt")
     except Exception:
         return PreflightItem(
             label,
@@ -93,14 +147,39 @@ def inspect_gector_model(model_id: str) -> PreflightItem:
             "Not cached yet. First grammar-enhanced run will download these files from Hugging Face.",
         )
 
-    if all(path.exists() for path in cached_paths):
-        return PreflightItem(label, "ok", f"Cached in {cached_paths[0].parent}")
+    if not all(path.exists() for path in cached_paths):
+        return PreflightItem(
+            label,
+            "info",
+            "Some cached files are missing. First grammar-enhanced run may need to re-download them.",
+        )
 
-    return PreflightItem(
-        label,
-        "info",
-        "Some cached files are missing. First grammar-enhanced run may need to re-download them.",
-    )
+    try:
+        config_dict = json.loads(cached_paths[0].read_text(encoding="utf-8"))
+    except Exception:
+        return PreflightItem(
+            label,
+            "info",
+            "Model config is cached but could not be read. First grammar-enhanced run may need to refresh it.",
+        )
+
+    backbone_model_id = config_dict.get("model_id")
+    if isinstance(backbone_model_id, str) and backbone_model_id.strip():
+        try:
+            backbone_dir = _resolve_transformer_model_from_cache(backbone_model_id.strip())
+        except Exception:
+            return PreflightItem(
+                label,
+                "info",
+                f"GECToR repo is cached, but backbone '{backbone_model_id}' is not cached yet.",
+            )
+        return PreflightItem(
+            label,
+            "ok",
+            f"Cached in {cached_paths[0].parent} with backbone cached at {backbone_dir}",
+        )
+
+    return PreflightItem(label, "ok", f"Cached in {cached_paths[0].parent}")
 
 
 def inspect_verb_dictionary() -> PreflightItem:
@@ -137,15 +216,15 @@ def inspect_language_tool_runtime() -> PreflightItem:
 
 def collect_preflight_items(
     config: AppConfig | None = None,
-    *,
-    realtime_model_name: str = REALTIME_MODEL_NAME,
 ) -> list[PreflightItem]:
     """Collect cache/setup notes that matter before the GUI starts."""
     app_config = config or get_config()
-    items = [inspect_whisper_model(app_config.transcription.whisper_model)]
-
-    if realtime_model_name != app_config.transcription.whisper_model:
-        items.append(inspect_whisper_model(realtime_model_name))
+    items: list[PreflightItem] = []
+    if app_config.transcription.batch_backend in {"local_whisper", "compare"}:
+        items.extend(
+            inspect_whisper_model(model_name)
+            for model_name in get_whisper_models_for_runtime(app_config)
+        )
 
     if app_config.grammar.enabled:
         items.append(inspect_gector_model(app_config.grammar.gector_model))

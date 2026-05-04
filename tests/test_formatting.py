@@ -64,10 +64,10 @@ class TestFormatTranscriptAsJson:
         import json
         result = format_transcript_as_json(sample_segments)
         data = json.loads(result)
-        assert "segments" in data or isinstance(data, list)
+        assert data == sample_segments
 
     def test_empty_segments(self):
         import json
         result = format_transcript_as_json([])
         data = json.loads(result)
-        assert isinstance(data, (list, dict))
+        assert data == []

@@ -1,6 +1,23 @@
 [tool.pytest.ini_options]
-addopts = "-q"
+addopts = "-q --cov --cov-report=term-missing"
 testpaths = ["tests"]
+
+# Coverage intentionally focuses on modules with stable unit-test seams.
+# GUI/transcription orchestration is type-checked by pyright and exercised by targeted integration-style tests.
+[tool.coverage.run]
+source = [
+    "app_paths",
+    "audio_preprocessor",
+    "config",
+    "exceptions",
+    "launcher_preflight",
+    "torch_runtime",
+    "transcript_types",
+]
+
+[tool.coverage.report]
+fail_under = 85
+show_missing = true
 
 [tool.ruff]
 target-version = "py312"
@@ -35,6 +52,7 @@ include = [
     "gui_runtime_bootstrap.py",
     "gui_transcriber.py",
     "launcher_preflight.py",
+    "openai_realtime.py",
     "runtime_bootstrap.py",
     "themes.py",
     "torch_runtime.py",

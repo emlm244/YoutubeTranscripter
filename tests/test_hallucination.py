@@ -28,6 +28,11 @@ class TestIsHallucination:
     def test_case_insensitive(self):
         assert is_hallucination("THANK YOU FOR WATCHING")
 
+    def test_prompt_leakage_text(self):
+        assert is_hallucination(
+            "Do not paraphrase or rewrite for grammar. Use punctuation and capitalization only to make the spoken words readable."
+        )
+
 
 class TestFilterHallucinations:
     """Test filter_hallucinations function."""
@@ -35,8 +40,9 @@ class TestFilterHallucinations:
     def test_removes_hallucinations(self):
         segments = ["Hello world.", "Thank you for watching!", "Goodbye."]
         result, count = filter_hallucinations(segments)
-        assert count >= 1
+        assert count == 1
         assert "Thank you for watching!" not in result
+        assert "Goodbye." in result
         assert "Hello world." in result
 
     def test_no_hallucinations(self):

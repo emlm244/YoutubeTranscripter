@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 import importlib.util
+import json
 import logging
 import os
 import sys
@@ -17,9 +18,11 @@ import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Literal, Optional, Tuple, overload
+from urllib.parse import urlparse
 
 from app_paths import get_resource_root, get_writable_app_data_root
 from config import GrammarConfig
+import runtime_bootstrap  # noqa: F401
 from torch_runtime import get_torch, get_torch_import_error
 from transcript_types import (
     TranscriptSegmentLike,
@@ -46,6 +49,16 @@ VERB_DICT_URL = "https://raw.githubusercontent.com/grammarly/gector/master/data/
 _lt_instances: Dict[str, Any] = {}
 _lt_lock = threading.Lock()
 LANGUAGETOOL_DOWNLOAD_VERSION = "6.6"
+
+
+def _apply_gector_config_compat_fields(config: Any, config_dict: dict[str, Any]) -> Any:
+    """Populate config attributes that gector expects but its config class drops."""
+    if not hasattr(config, "max_length"):
+        try:
+            config.max_length = int(config_dict.get("max_length", 80))
+        except (TypeError, ValueError):
+            config.max_length = 80
+    return config
 
 
 @dataclass(frozen=True)
@@ -94,7 +107,10 @@ def get_verb_dictionary_path() -> Path | None:
 
 def _module_available(module_name: str) -> bool:
     """Return whether a module can be imported without importing it eagerly."""
-    return importlib.util.find_spec(module_name) is not None
+    try:
+        return importlib.util.find_spec(module_name) is not None
+    except (ImportError, ValueError):
+        return module_name in sys.modules
 
 
 def _resolve_cached_hf_file(repo_id: str, filename: str) -> Path | None:
@@ -111,6 +127,116 @@ def _resolve_cached_hf_file(repo_id: str, filename: str) -> Path | None:
         return Path(hf_hub_download(repo_id=repo_id, filename=filename, local_files_only=True))
     except Exception:
         return None
+
+
+def _resolve_cached_hf_repo_dir(repo_id: str, *, required_files: Sequence[str]) -> Path | None:
+    """Return the cached snapshot directory when all required files exist locally."""
+    if not repo_id:
+        return None
+
+    resolved_paths: list[Path] = []
+    for filename in required_files:
+        path = _resolve_cached_hf_file(repo_id, filename)
+        if path is None or not path.exists():
+            return None
+        resolved_paths.append(path)
+
+    return resolved_paths[0].parent if resolved_paths else None
+
+
+def _resolve_cached_tokenizer_dir(repo_id: str) -> Path | None:
+    """Resolve a cached tokenizer directory that can be loaded fully offline."""
+    tokenizer_json_dir = _resolve_cached_hf_repo_dir(
+        repo_id,
+        required_files=("tokenizer.json", "tokenizer_config.json"),
+    )
+    if tokenizer_json_dir is not None:
+        return tokenizer_json_dir
+
+    return _resolve_cached_hf_repo_dir(
+        repo_id,
+        required_files=("vocab.json", "merges.txt", "tokenizer_config.json"),
+    )
+
+
+def _resolve_cached_transformer_repo_dir(repo_id: str) -> Path | None:
+    """Resolve a cached transformer backbone directory with config, weights, and tokenizer."""
+    if not repo_id:
+        return None
+
+    if _resolve_cached_tokenizer_dir(repo_id) is None:
+        return None
+
+    for weight_filename in ("model.safetensors", "pytorch_model.bin"):
+        cached_dir = _resolve_cached_hf_repo_dir(
+            repo_id,
+            required_files=("config.json", weight_filename),
+        )
+        if cached_dir is not None:
+            return cached_dir
+
+    return None
+
+
+def _resolve_cached_gector_repo_dir(model_id: str) -> Path | None:
+    """Resolve a cached GECToR repo directory with its weights and tokenizer assets."""
+    if not model_id:
+        return None
+
+    if _resolve_cached_tokenizer_dir(model_id) is None:
+        return None
+
+    return _resolve_cached_hf_repo_dir(
+        model_id,
+        required_files=("config.json", "pytorch_model.bin"),
+    )
+
+
+def _resolve_pretrained_source(repo_id: str, *, cache_resolver: Any) -> tuple[str, bool]:
+    """Prefer a fully cached local directory over a Hub-backed repo id."""
+    local_dir = cache_resolver(repo_id)
+    if local_dir is None:
+        return repo_id, False
+    return str(local_dir), True
+
+
+def _resolve_pretrained_file(source: str, *, filename: str, local_files_only: bool = False) -> Path:
+    """Resolve a pretrained file from either a local directory or the Hub."""
+    source_path = Path(source)
+    if source_path.exists():
+        return source_path / filename
+
+    from huggingface_hub import hf_hub_download
+
+    return Path(
+        hf_hub_download(
+            repo_id=source,
+            filename=filename,
+            local_files_only=local_files_only,
+        )
+    )
+
+
+def _load_transformers_tokenizer(auto_tokenizer: Any, source: str, *, local_files_only: bool) -> Any:
+    """Load a tokenizer while remaining compatible with older/mocked signatures."""
+    try:
+        return auto_tokenizer.from_pretrained(source, local_files_only=local_files_only)
+    except TypeError:
+        return auto_tokenizer.from_pretrained(source)
+
+
+def _load_transformers_model(
+    auto_model: Any,
+    source: str,
+    *,
+    local_files_only: bool,
+    **kwargs: Any,
+) -> Any:
+    """Load a transformer model while remaining compatible with older/mocked signatures."""
+    try:
+        return auto_model.from_pretrained(source, local_files_only=local_files_only, **kwargs)
+    except TypeError:
+        return auto_model.from_pretrained(source, **kwargs)
 
 
 def get_languagetool_runtime_status() -> LanguageToolRuntimeStatus:
@@ -239,16 +365,37 @@ def _load_gector_model(model_id: str) -> Any:
 
     import torch.nn as nn
     from torch.nn import CrossEntropyLoss
-    import json
     from gector import GECToR, GECToRConfig
     from transformers import AutoModel, AutoTokenizer, PreTrainedModel
-    from huggingface_hub import hf_hub_download
+
+    gector_source, gector_local_only = _resolve_pretrained_source(
+        model_id,
+        cache_resolver=_resolve_cached_gector_repo_dir,
+    )
+    if gector_local_only:
+        logger.info("Loading GECToR assets from local cache: %s", gector_source)
 
     # Step 1: Download and load config
-    config_path = hf_hub_download(repo_id=model_id, filename="config.json")
-    with open(config_path, 'r') as f:
+    config_path = _resolve_pretrained_file(
+        gector_source,
+        filename="config.json",
+        local_files_only=gector_local_only,
+    )
+    with open(config_path, "r", encoding="utf-8") as f:
         config_dict = json.load(f)
     config = GECToRConfig(**config_dict)
+    config = _apply_gector_config_compat_fields(config, config_dict)
+
+    backbone_model_id = str(getattr(config, "model_id", "") or "")
+    backbone_source = backbone_model_id
+    backbone_local_only = False
+    if backbone_model_id:
+        backbone_source, backbone_local_only = _resolve_pretrained_source(
+            backbone_model_id,
+            cache_resolver=_resolve_cached_transformer_repo_dir,
+        )
+        if backbone_local_only:
+            logger.info("Loading GECToR backbone from local cache: %s", backbone_source)
 
     # Step 2: Create patched GECToR class that avoids meta device issues
     class _GECToRPatched(GECToR):
@@ -260,13 +407,22 @@ def _load_gector_model(model_id: str) -> Any:
             self.config = config
 
             # Load tokenizer normally
-            self.tokenizer = AutoTokenizer.from_pretrained(config.model_id)
+            self.tokenizer = _load_transformers_tokenizer(
+                AutoTokenizer,
+                backbone_source,
+                local_files_only=backbone_local_only,
+            )
 
             # Load BERT with low_cpu_mem_usage=False to disable meta device
             bert_kwargs = {"low_cpu_mem_usage": False}
             if config.has_add_pooling_layer:
                 bert_kwargs["add_pooling_layer"] = False
-            self.bert = AutoModel.from_pretrained(config.model_id, **bert_kwargs)
+            self.bert = _load_transformers_model(
+                AutoModel,
+                backbone_source,
+                local_files_only=backbone_local_only,
+                **bert_kwargs,
+            )
 
             # Extend embeddings for $START token
             self.bert.resize_token_embeddings(
@@ -293,7 +449,11 @@ def _load_gector_model(model_id: str) -> Any:
     model = _GECToRPatched(config)
 
     # Step 4: Download and load weights
-    model_path = hf_hub_download(repo_id=model_id, filename="pytorch_model.bin")
+    model_path = _resolve_pretrained_file(
+        gector_source,
+        filename="pytorch_model.bin",
+        local_files_only=gector_local_only,
+    )
     state_dict = torch.load(model_path, map_location="cpu", weights_only=True)
     model.load_state_dict(state_dict, strict=False)
 
@@ -334,6 +494,9 @@ class _GECToRManager:
         try:
             verb_dict_path = DATA_DIR / "verb-form-vocab.txt"
             DATA_DIR.mkdir(parents=True, exist_ok=True)
+            if urlparse(VERB_DICT_URL).scheme not in {"http", "https"}:
+                logger.error("Verb dictionary URL must use an http(s) scheme: %s", VERB_DICT_URL)
+                return None
             logger.info(f"Downloading verb dictionary from {VERB_DICT_URL}...")
             urllib.request.urlretrieve(VERB_DICT_URL, verb_dict_path)
             logger.info("Verb dictionary downloaded")
@@ -374,6 +537,11 @@ class _GECToRManager:
                 from transformers import AutoTokenizer
                 from gector import load_verb_dict
 
+                gector_source, gector_local_only = _resolve_pretrained_source(
+                    model_id,
+                    cache_resolver=_resolve_cached_gector_repo_dir,
+                )
+
                 # Determine device
                 if torch.cuda.is_available():
                     self.device = "cuda"
@@ -392,7 +560,11 @@ class _GECToRManager:
                     logger.info("GECToR using CPU (no CUDA available)")
 
                 # Load tokenizer
-                self.tokenizer = AutoTokenizer.from_pretrained(model_id)
+                self.tokenizer = _load_transformers_tokenizer(
+                    AutoTokenizer,
+                    gector_source,
+                    local_files_only=gector_local_only,
+                )
 
                 # Load verb dictionary
                 self.encode, self.decode = load_verb_dict(str(verb_dict_path))
@@ -497,12 +669,12 @@ class _GECToRManager:
                     torch = _load_torch_module(context="correct")
                     if torch is not None:
                         torch.cuda.empty_cache()
-                except Exception:
-                    pass
+                except Exception as cache_err:
+                    logger.warning("Failed to clear CUDA cache after GECToR out-of-memory error: %s", cache_err)
             raise
         except Exception as e:
             logger.error(f"GECToR correction failed: {e}")
-            return sentences
+            raise RuntimeError(f"GECToR correction failed: {e}") from e
 
 
 # =============================================================================
@@ -877,15 +1049,19 @@ def post_process_grammar(
         return processed_text, None, was_enhanced
 
 
-def check_grammar_status(*, lazy: bool = False) -> Tuple[bool, str]:
+def check_grammar_status(
+    *,
+    lazy: bool = False,
+    config: Optional[GrammarConfig] = None,
+) -> Tuple[bool, str]:
     """Check if grammar post-processing is available.
 
     Returns:
         Tuple of (is_available, status_message).
     """
-    processor = GrammarPostProcessor()
+    processor = GrammarPostProcessor(config)
     status = processor.peek_status() if lazy else processor.get_status()
-    is_available = "Unavailable" not in status and status != "Disabled" and status != "No backend available"
+    is_available = "Unavailable" not in status and status not in {"Disabled", "No backend available"}
     return is_available, status
 
 
@@ -914,9 +1090,17 @@ def get_gector_runtime_status(model_id: str) -> GectorRuntimeStatus:
             "unavailable",
         )
 
-    required_files = ("config.json", "pytorch_model.bin")
-    cached_paths = [_resolve_cached_hf_file(model_id, filename) for filename in required_files]
-    if all(path is not None and path.exists() for path in cached_paths):
+    cached_gector_dir = _resolve_cached_gector_repo_dir(model_id)
+    if cached_gector_dir is not None:
+        try:
+            config_dict = json.loads((cached_gector_dir / "config.json").read_text(encoding="utf-8"))
+        except Exception:
+            return GectorRuntimeStatus(True, "GECToR (downloads model on demand)", "needs_download")
+
+        backbone_model_id = config_dict.get("model_id")
+        if isinstance(backbone_model_id, str) and backbone_model_id.strip():
+            if _resolve_cached_transformer_repo_dir(backbone_model_id.strip()) is None:
+                return GectorRuntimeStatus(True, "GECToR (downloads model on demand)", "needs_download")
         return GectorRuntimeStatus(True, "GECToR (ready on demand)", "ready_on_demand")
 
     return GectorRuntimeStatus(True, "GECToR (downloads model on demand)", "needs_download")

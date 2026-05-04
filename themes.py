@@ -1,4 +1,4 @@
-"""Nord Minimal Theme for YouTube Transcriber application.
+"""Nord Minimal Theme for the transcription application.
 
 Clean, modern theme inspired by the Nord color palette.
 Removes glassmorphism and complex effects for a cleaner look.
@@ -100,7 +100,7 @@ DARK_THEME = ThemeColors()
 class ThemeManager:
     """Manages application theming and stylesheet generation."""
 
-    def __init__(self, theme: Optional[ThemeColors] = None):
+    def __init__(self, theme: Optional[ThemeColors] = None) -> None:
         """Initialize theme manager.
 
         Args:
@@ -444,12 +444,12 @@ class ThemeManager:
         color = colors.get(status_type, self.colors.success)
         return f"color: {color}; font-weight: 600;"
 
-    def get_gpu_status_style(self, has_gpu: bool) -> str:
+    def get_gpu_status_style(self, *, has_gpu: bool) -> str:
         """Get style for GPU status label."""
         color = self.colors.primary if has_gpu else self.colors.warning
         return f"color: {color}; font-weight: 500; padding: 0 10px;"
 
-    def get_recording_status_style(self, is_recording: bool) -> str:
+    def get_recording_status_style(self, *, is_recording: bool) -> str:
         """Get style for recording status label."""
         if is_recording:
             return f"color: {self.colors.recording}; font-size: 10pt; font-weight: 600;"
