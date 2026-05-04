@@ -12,12 +12,6 @@ from pathlib import Path
 from typing import Optional
 
 from app_paths import get_config_path
-from openai_realtime import (
-    DEFAULT_OPENAI_REALTIME_SESSION_MODEL,
-    DEFAULT_OPENAI_REALTIME_TRANSCRIPTION_MODEL,
-    normalize_openai_realtime_transcription_model,
-)
-
 logger = logging.getLogger(__name__)
 
 DEFAULT_WHISPER_MODEL = "large-v3"
@@ -158,18 +152,6 @@ class RecordingConfig:
 
     default_microphone: str = ""
     sample_rate: int = 16000
-    openai_realtime_session_model: str = DEFAULT_OPENAI_REALTIME_SESSION_MODEL
-    openai_realtime_transcription_model: str = DEFAULT_OPENAI_REALTIME_TRANSCRIPTION_MODEL
-
-    def __post_init__(self) -> None:
-        if not isinstance(self.openai_realtime_session_model, str):
-            self.openai_realtime_session_model = DEFAULT_OPENAI_REALTIME_SESSION_MODEL
-        self.openai_realtime_session_model = (
-            self.openai_realtime_session_model.strip() or DEFAULT_OPENAI_REALTIME_SESSION_MODEL
-        )
-        self.openai_realtime_transcription_model = normalize_openai_realtime_transcription_model(
-            self.openai_realtime_transcription_model
-        )
 
 
 @dataclass
@@ -554,18 +536,6 @@ class AppConfig:
                 config.recording = RecordingConfig(
                     default_microphone=r.get("default_microphone", ""),
                     sample_rate=r.get("sample_rate", 16000),
-                    openai_realtime_session_model=str(
-                        r.get(
-                            "openai_realtime_session_model",
-                            config.recording.openai_realtime_session_model,
-                        )
-                    ).strip() or config.recording.openai_realtime_session_model,
-                    openai_realtime_transcription_model=str(
-                        r.get(
-                            "openai_realtime_transcription_model",
-                            config.recording.openai_realtime_transcription_model,
-                        )
-                    ).strip(),
                 )
 
             # Load UI settings

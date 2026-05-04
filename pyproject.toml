@@ -52,7 +52,6 @@ include = [
     "gui_runtime_bootstrap.py",
     "gui_transcriber.py",
     "launcher_preflight.py",
-    "openai_realtime.py",
     "runtime_bootstrap.py",
     "themes.py",
     "torch_runtime.py",

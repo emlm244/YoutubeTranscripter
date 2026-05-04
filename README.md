@@ -4,7 +4,7 @@ Desktop and CLI transcription tooling for three primary flows:
 
 - YouTube URLs, with caption-first fallback to `yt-dlp` plus OpenAI or local Whisper
 - Local audio/video files, with audio-stream selection, FFmpeg extraction, and selectable OpenAI/local backends
-- Live microphone transcription in the PyQt6 GUI through the OpenAI Realtime API
+- Microphone recording in the PyQt6 GUI, transcribed after capture with the selected batch backend
 
 ## Source Of Truth
 
@@ -49,7 +49,7 @@ python gui_transcriber.py
 
 The GUI keeps functional settings in `AppConfig` and uses Qt `QSettings` only for window and splitter state.
 Microphone enumeration and dependency/GPU diagnostics are deferred until after the window paints so startup stays responsive.
-Batch transcription can run with OpenAI, local Whisper, or Compare mode. Compare mode runs OpenAI first and local Whisper second, then shows both transcripts with labels for benchmarking. The microphone card is OpenAI Realtime only and no longer preloads or decodes with local Whisper.
+Batch transcription can run with OpenAI, local Whisper, or Compare mode. Compare mode runs OpenAI first and local Whisper second, then shows both transcripts with labels for benchmarking. The microphone card records locally first, then sends the captured audio through the same backend selection as local files.
 
 ## CLI
 

@@ -82,23 +82,13 @@ class TestTranscriptionConfig:
 
 
 class TestRecordingConfig:
-    """Test RecordingConfig dataclass defaults and model normalization."""
+    """Test RecordingConfig dataclass defaults."""
 
     def test_defaults(self):
         cfg = RecordingConfig()
 
-        assert cfg.openai_realtime_session_model == "gpt-realtime-1.5"
-        assert cfg.openai_realtime_transcription_model == "gpt-4o-transcribe"
-
-    def test_retired_transcription_latest_alias_is_normalized(self):
-        cfg = RecordingConfig(openai_realtime_transcription_model="gpt-4o-transcribe-latest")
-
-        assert cfg.openai_realtime_transcription_model == "gpt-4o-transcribe"
-
-    def test_custom_transcription_model_is_preserved(self):
-        cfg = RecordingConfig(openai_realtime_transcription_model="gpt-4o-mini-transcribe-2025-12-15")
-
-        assert cfg.openai_realtime_transcription_model == "gpt-4o-mini-transcribe-2025-12-15"
+        assert cfg.default_microphone == ""
+        assert cfg.sample_rate == 16000
 
 
 class TestAccuracyPresets:
@@ -260,12 +250,14 @@ class TestAppConfig:
         assert cfg.transcription.batch_backend == "openai"
         assert cfg.transcription.whisper_model == "large-v3"
         assert cfg.transcription.initial_prompt is None
-        assert cfg.recording.openai_realtime_transcription_model == "gpt-4o-transcribe"
+        assert cfg.recording.sample_rate == 16000
         assert cfg.grammar.enabled is False
 
-    def test_load_migrates_retired_realtime_transcription_model_alias(self):
+    def test_load_ignores_legacy_realtime_recording_keys(self):
         data = {
             "recording": {
+                "default_microphone": "Studio Mic",
+                "sample_rate": 48000,
                 "openai_realtime_session_model": "gpt-realtime-1.5",
                 "openai_realtime_transcription_model": "gpt-4o-transcribe-latest",
             }
@@ -275,7 +267,10 @@ class TestAppConfig:
             f.flush()
             cfg = AppConfig.load(Path(f.name))
 
-        assert cfg.recording.openai_realtime_transcription_model == "gpt-4o-transcribe"
+        assert cfg.recording.default_microphone == "Studio Mic"
+        assert cfg.recording.sample_rate == 48000
+        assert not hasattr(cfg.recording, "openai_realtime_session_model")
+        assert not hasattr(cfg.recording, "openai_realtime_transcription_model")
 
     def test_load_logs_legacy_model_migration_warning(self, caplog):
         data = {

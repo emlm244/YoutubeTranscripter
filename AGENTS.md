@@ -11,8 +11,7 @@ Always commit to PR to remote. Either commit it to an open PR or make a new PR i
 - `runtime_bootstrap.py` owns cache and environment setup for Hugging Face and transformers. Avoid ad hoc `os.environ.setdefault(...)` copies in other modules because tests and packaged runs need the cache root to update deterministically.
 - `AppConfig` is the source of truth for functional settings. `QSettings` is only for Qt UI state like splitter geometry.
 - Grammar status checks must stay lazy. Startup should not instantiate GECToR or LanguageTool just to render a status label.
-- OpenAI realtime transcription uses a regular realtime WebSocket (`?model=...`) with `session.update`, `session.type="realtime"`, and `audio.input.transcription`; do not send `session.type="transcription"` or `transcription_session.update` on this path.
-- OpenAI realtime WebSocket closes can happen mid-recording. Preserve partial deltas and reconnect instead of treating a remote close as a fatal recording error.
+- Microphone recording is capture-first batch transcription. Do not add a separate streaming path; after Stop Recording, route the captured audio through the same backend workflow as local files.
 - `build/`, `dist/`, `venv/`, `hf-cache/`, logs, `tmp/`, and cache directories are generated artifacts, not source.
 
 ## Review Defaults

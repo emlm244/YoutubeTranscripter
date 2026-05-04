@@ -165,7 +165,7 @@ if !FIRST_RUN!==1 (
     echo [OK] All dependencies installed
 ) else (
     REM Fast presence check on normal launches; avoid importing the full AI stack every time.
-    python -c "import importlib.util; pkgs=['gui_runtime_bootstrap','youtube_transcript_api','faster_whisper','yt_dlp','sounddevice','language_tool_python','transformers','gector','PyQt6','openai','websocket']; missing=[p for p in pkgs if importlib.util.find_spec(p) is None]; raise SystemExit(1 if missing else 0)" >nul 2>&1
+    python -c "import importlib.util; pkgs=['gui_runtime_bootstrap','youtube_transcript_api','faster_whisper','yt_dlp','sounddevice','language_tool_python','transformers','gector','PyQt6','openai']; missing=[p for p in pkgs if importlib.util.find_spec(p) is None]; raise SystemExit(1 if missing else 0)" >nul 2>&1
     if errorlevel 1 (
         echo Dependencies missing or outdated. Installing...
         pip install -q -r requirements.txt
@@ -182,7 +182,7 @@ if !FIRST_RUN!==1 (
         )
 
         REM Only run the heavier import validation after a repair/install path.
-        python -c "import gui_runtime_bootstrap, youtube_transcript_api, faster_whisper, yt_dlp, sounddevice, language_tool_python, transformers, gector, PyQt6, openai, websocket" >nul 2>&1
+        python -c "import gui_runtime_bootstrap, youtube_transcript_api, faster_whisper, yt_dlp, sounddevice, language_tool_python, transformers, gector, PyQt6, openai" >nul 2>&1
         if errorlevel 1 (
             echo [ERROR] Dependencies still failed validation after installation
             echo.

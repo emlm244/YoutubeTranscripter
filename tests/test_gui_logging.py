@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 import queue
 import threading
 from types import SimpleNamespace
 from typing import Any, cast
 
 import gui_transcriber as gt
+import numpy as np
 
 from config import GrammarConfig, TranscriptionConfig
 from gui_transcriber import (
@@ -22,7 +24,6 @@ from gui_transcriber import (
     _queue_transcript_snapshot,
     _worker_queue_bridge,
 )
-from openai_realtime import OPENAI_REALTIME_MIN_COMMIT_AUDIO_BYTES
 from transcript_types import make_transcript_segment
 
 
@@ -485,81 +486,29 @@ def test_transcription_setting_help_texts_cover_visible_titles() -> None:
     assert all(gt.TRANSCRIPTION_SETTING_HELP_TEXTS[key].strip() for key in expected_keys)
 
 
-def test_start_recording_uses_openai_without_loading_whisper(monkeypatch) -> None:
-    """Recording should start OpenAI realtime capture without loading local Whisper."""
+def test_start_recording_local_backend_does_not_require_openai_key(monkeypatch) -> None:
+    """Local Whisper microphone recording should start without an OpenAI key."""
     progress_messages: list[str] = []
-    thread_calls: list[tuple[object, tuple[object, ...], bool | None]] = []
     status_calls: list[tuple[str, object]] = []
-
-    class _FakeThread:
-        def __init__(self, *, target, args=(), daemon=None):
-            thread_calls.append((target, args, daemon))
-
-        def start(self) -> None:
-            return None
 
     fake_gui = cast(
         Any,
         SimpleNamespace(
             is_recording=False,
-            whisper_model=None,
-            _loaded_whisper_model_name=None,
-            _loaded_compute_type=None,
-            _whisper_device="cpu",
-            _loading_model=False,
-            _pending_record_start=False,
-            record_button=SimpleNamespace(setEnabled=lambda enabled: None),
+            transcribe_thread=None,
             append_progress=lambda text: progress_messages.append(text),
-            theme=SimpleNamespace(colors=SimpleNamespace(warning="#f90", error="#f00")),
-            load_whisper_model=lambda model_name=None, transcription_config=None: None,
-            _build_transcription_config=lambda: TranscriptionConfig(whisper_model="large-v3"),
             update_status=lambda message, color=None: status_calls.append((message, color)),
+            theme=SimpleNamespace(colors=SimpleNamespace(error="#f00", warning="#f90")),
+            _build_transcription_config=lambda: TranscriptionConfig(batch_backend="local_whisper"),
             _start_recording_now=lambda: status_calls.append(("started", None)),
         ),
     )
-    monkeypatch.setattr(gt.threading, "Thread", _FakeThread)
-    monkeypatch.setattr(gt, "is_openai_api_configured", lambda: True)
+    monkeypatch.setattr(gt, "is_openai_api_configured", lambda: False)
 
     TranscriberGUI.start_recording(fake_gui)
 
-    assert fake_gui._loading_model is False
-    assert fake_gui._pending_record_start is False
     assert progress_messages == []
-    assert thread_calls == []
     assert status_calls == [("started", None)]
-
-
-def test_start_recording_ignores_loaded_whisper_pipeline(monkeypatch) -> None:
-    """OpenAI realtime recording should not depend on a previously loaded Whisper pipeline."""
-    progress_messages: list[str] = []
-    started: list[str] = []
-
-    fake_gui = cast(
-        Any,
-        SimpleNamespace(
-            is_recording=False,
-            whisper_model=object(),
-            _loaded_whisper_model_name="large-v3",
-            _loaded_compute_type="int8",
-            _requested_whisper_device="cuda",
-            _requested_compute_type="float16",
-            _whisper_device="cpu",
-            _loading_model=False,
-            _pending_record_start=False,
-            append_progress=lambda text: progress_messages.append(text),
-            theme=SimpleNamespace(colors=SimpleNamespace(error="#f00")),
-            update_status=lambda message, color=None: None,
-            _start_recording_now=lambda: started.append("started"),
-        ),
-    )
-    monkeypatch.setattr(gt, "is_openai_api_configured", lambda: True)
-
-    TranscriberGUI.start_recording(fake_gui)
-
-    assert started == ["started"]
-    assert fake_gui._loading_model is False
-    assert fake_gui._pending_record_start is False
-    assert progress_messages == []
 
 
 def test_start_recording_blocks_when_openai_key_missing(monkeypatch) -> None:
@@ -570,9 +519,11 @@ def test_start_recording_blocks_when_openai_key_missing(monkeypatch) -> None:
         Any,
         SimpleNamespace(
             is_recording=False,
+            transcribe_thread=None,
             append_progress=lambda text: progress_messages.append(text),
             update_status=lambda message, color=None: status_calls.append((message, color)),
             theme=SimpleNamespace(colors=SimpleNamespace(error="#f00", warning="#f90")),
+            _build_transcription_config=lambda: TranscriptionConfig(batch_backend="openai"),
             _start_recording_now=lambda: status_calls.append(("started", None)),
         ),
     )
@@ -582,59 +533,6 @@ def test_start_recording_blocks_when_openai_key_missing(monkeypatch) -> None:
 
     assert "OPENAI_API_KEY is not set" in progress_messages[0]
     assert status_calls == [("Missing OPENAI_API_KEY", "#f00")]
-
-
-def test_recording_transcription_uses_shared_whisper_kwargs(monkeypatch) -> None:
-    """Microphone transcription should share the same Whisper kwargs builder as other flows."""
-    preprocess_calls: list[tuple[int, bool, bool]] = []
-    transcribe_call: dict[str, Any] = {}
-
-    def _fake_preprocess(audio_array, *, sample_rate, noise_reduction, normalize):
-        preprocess_calls.append((sample_rate, noise_reduction, normalize))
-        return audio_array
-
-    def _fake_transcribe(audio_array, **kwargs):
-        transcribe_call["audio"] = audio_array
-        transcribe_call["kwargs"] = kwargs
-        return [SimpleNamespace(start=0.0, end=1.0, text="hello world")], SimpleNamespace()
-
-    fake_gui = cast(
-        Any,
-        SimpleNamespace(
-            whisper_model=SimpleNamespace(transcribe=_fake_transcribe),
-            _whisper_device="cpu",
-            _loaded_whisper_model_name="large-v3",
-            config=SimpleNamespace(recording=SimpleNamespace(sample_rate=16000)),
-            output_queue=queue.Queue(),
-            theme=SimpleNamespace(colors=SimpleNamespace(warning="#f90", success_light="#0f0")),
-        ),
-    )
-    monkeypatch.setattr(gt, "preprocess_array", _fake_preprocess)
-    monkeypatch.setattr(gt, "_queue_transcript_snapshot", lambda *args, **kwargs: None)
-
-    transcription_config = TranscriptionConfig(
-        whisper_model="large-v3",
-        batch_size=32,
-        initial_prompt="Stay faithful.",
-        hotwords="Anthropic, Claude",
-        noise_reduction_enabled=True,
-        normalize_audio=False,
-    )
-
-    TranscriberGUI._transcribe_accumulated_audio(
-        fake_gui,
-        [0.1, -0.1, 0.2],
-        2,
-        transcription_config,
-        GrammarConfig(enabled=False),
-    )
-
-    assert preprocess_calls == [(16000, True, False)]
-    assert transcribe_call["kwargs"]["best_of"] == transcription_config.beam_size
-    assert transcribe_call["kwargs"]["vad_parameters"]["threshold"] == transcription_config.vad_threshold
-    assert transcribe_call["kwargs"]["initial_prompt"] == "Stay faithful."
-    assert transcribe_call["kwargs"]["hotwords"] == "Anthropic, Claude"
-    assert transcribe_call["kwargs"]["batch_size"] == 8
 
 
 def test_start_recording_waits_for_existing_transcription() -> None:
@@ -661,179 +559,157 @@ def test_start_recording_waits_for_existing_transcription() -> None:
     assert status_calls == [("Transcription already in progress", "#f90")]
 
 
-def test_recording_transcription_resamples_from_capture_rate(monkeypatch) -> None:
-    """Microphone transcription should preprocess at the capture rate, then resample for Whisper."""
-    preprocess_calls: list[tuple[int, bool, bool]] = []
-    transcribed_lengths: list[int] = []
-
-    def _fake_preprocess(audio_array, *, sample_rate, noise_reduction, normalize):
-        preprocess_calls.append((sample_rate, noise_reduction, normalize))
-        return audio_array
-
-    def _fake_transcribe(audio_array, **kwargs):
-        transcribed_lengths.append(len(audio_array))
-        return [SimpleNamespace(start=0.0, end=1.0, text="hello world")], SimpleNamespace()
+def test_process_queue_recording_captured_starts_batch_transcription() -> None:
+    """A completed capture should reset capture UI and hand audio to the batch worker."""
+    started_jobs: list[tuple[list[float], int, int]] = []
+    reset_calls: list[str] = []
+    status_calls: list[tuple[str, object]] = []
 
     fake_gui = cast(
         Any,
         SimpleNamespace(
-            whisper_model=SimpleNamespace(transcribe=_fake_transcribe),
-            _whisper_device="cpu",
-            _loaded_whisper_model_name="large-v3",
-            config=SimpleNamespace(recording=SimpleNamespace(sample_rate=16000)),
             output_queue=queue.Queue(),
-            theme=SimpleNamespace(colors=SimpleNamespace(warning="#f90", success_light="#0f0")),
+            config=SimpleNamespace(recording=SimpleNamespace(sample_rate=16000)),
+            theme=SimpleNamespace(colors=SimpleNamespace(warning="#f90")),
+            _reset_recording_ui_state=lambda: reset_calls.append("reset"),
+            update_status=lambda message, color=None: status_calls.append((message, color)),
+            _start_recorded_audio_transcription=lambda *, audio_buffer, duration_seconds, sample_rate: started_jobs.append(
+                (audio_buffer, duration_seconds, sample_rate)
+            ),
         ),
     )
-    monkeypatch.setattr(gt, "preprocess_array", _fake_preprocess)
-    monkeypatch.setattr(gt, "_queue_transcript_snapshot", lambda *args, **kwargs: None)
+    fake_gui.output_queue.put(("recording_captured", [0.1, -0.2], 3, 48000))
 
-    TranscriberGUI._transcribe_accumulated_audio(
-        fake_gui,
-        [0.1] * 480,
-        1,
-        TranscriptionConfig(
-            whisper_model="large-v3",
-            noise_reduction_enabled=True,
-            normalize_audio=False,
-        ),
-        GrammarConfig(enabled=False),
-        48_000,
-    )
+    TranscriberGUI.process_queue(fake_gui)
 
-    progress_messages = [
-        cast(str, msg[1]) for msg in _drain_queue(fake_gui.output_queue) if msg[0] == "progress"
-    ]
-
-    assert preprocess_calls == [(48_000, True, False)]
-    assert transcribed_lengths == [160]
-    assert any("Resampling recorded audio from 48000 Hz to 16000 Hz" in message for message in progress_messages)
+    assert reset_calls == ["reset"]
+    assert status_calls == [("Transcribing microphone recording...", "#f90")]
+    assert started_jobs == [([0.1, -0.2], 3, 48000)]
 
 
-def test_recording_transcription_retries_suspicious_output(monkeypatch) -> None:
-    """Microphone transcription should retry instead of accepting classic silence hallucinations."""
-    transcribe_calls: list[dict[str, Any]] = []
-    captured_snapshots: list[tuple[str, list[dict[str, Any]]]] = []
-
-    responses = [
-        [SimpleNamespace(start=0.0, end=1.0, text="Thank you for watching!")],
-        [SimpleNamespace(start=0.0, end=1.0, text="actual meeting update")],
-    ]
-
-    def _fake_transcribe(audio_array, **kwargs):
-        transcribe_calls.append(kwargs)
-        return responses[len(transcribe_calls) - 1], SimpleNamespace()
+def test_transcribe_recorded_audio_thread_uses_shared_batch_and_cleans_temp(tmp_path: Path) -> None:
+    """Recorded microphone audio should be persisted temporarily, batch-transcribed, then removed."""
+    temp_audio = tmp_path / "recording.wav"
+    temp_audio.write_bytes(b"wav")
+    batch_calls: list[str] = []
 
     fake_gui = cast(
         Any,
         SimpleNamespace(
-            whisper_model=SimpleNamespace(transcribe=_fake_transcribe),
-            _whisper_device="cpu",
-            _loaded_whisper_model_name="large-v3",
-            config=SimpleNamespace(recording=SimpleNamespace(sample_rate=16000)),
             output_queue=queue.Queue(),
             theme=SimpleNamespace(colors=SimpleNamespace(warning="#f90", success_light="#0f0")),
-        ),
-    )
-    monkeypatch.setattr(gt, "preprocess_array", lambda audio_array, **kwargs: audio_array)
-    monkeypatch.setattr(
-        gt,
-        "_queue_transcript_snapshot",
-        lambda target_queue, transcript, segments_data, **kwargs: captured_snapshots.append(
-            (transcript, segments_data)
+            _write_recorded_audio_to_temp_wav=lambda audio_buffer, sample_rate: str(temp_audio),
+            _transcribe_batch_media_file=lambda **kwargs: batch_calls.append(kwargs["file_path"]) or True,
         ),
     )
 
-    transcription_config = TranscriptionConfig(
-        whisper_model="large-v3",
-        batch_size=32,
-        initial_prompt="Stay faithful.",
-        condition_on_previous_text=True,
-        filter_hallucinations=True,
-        deduplicate_repeated_segments=True,
-    )
-
-    TranscriberGUI._transcribe_accumulated_audio(
+    TranscriberGUI.transcribe_recorded_audio_thread(
         fake_gui,
-        [0.1, -0.1, 0.2],
-        5,
-        transcription_config,
-        GrammarConfig(enabled=False),
-    )
-
-    assert len(transcribe_calls) == 2
-    assert transcribe_calls[0]["initial_prompt"] == "Stay faithful."
-    assert transcribe_calls[0]["condition_on_previous_text"] is True
-    assert transcribe_calls[1]["initial_prompt"] is None
-    assert transcribe_calls[1]["condition_on_previous_text"] is False
-    assert captured_snapshots == [("actual meeting update", [make_transcript_segment(start=0.0, end=1.0, text="actual meeting update")])]
-
-
-def test_recording_transcription_retries_runtime_errors_via_shared_loader(monkeypatch) -> None:
-    """CUDA runtime failures during microphone transcription should reuse the shared CPU fallback loader."""
-    loader_calls: list[tuple[str, str, str]] = []
-    captured_snapshots: list[tuple[str, list[dict[str, Any]]]] = []
-
-    class _FailingWhisper:
-        def transcribe(self, audio_array, **kwargs):
-            raise RuntimeError("out of memory")
-
-    def _cpu_transcribe(audio_array, **kwargs):
-        return [SimpleNamespace(start=0.0, end=1.0, text="cpu retry transcript")], SimpleNamespace()
-
-    fake_gui = cast(
-        Any,
-        SimpleNamespace(
-            whisper_model=_FailingWhisper(),
-            _whisper_device="cuda",
-            _loaded_whisper_model_name="large-v3",
-            _loaded_compute_type="float16",
-            config=SimpleNamespace(recording=SimpleNamespace(sample_rate=16000)),
-            output_queue=queue.Queue(),
-            theme=SimpleNamespace(colors=SimpleNamespace(warning="#f90", success_light="#0f0")),
-        ),
-    )
-    fake_gui._transcribe_accumulated_audio = lambda *args, **kwargs: TranscriberGUI._transcribe_accumulated_audio(
-        fake_gui,
-        *args,
-        **kwargs,
-    )
-    monkeypatch.setattr(gt, "preprocess_array", lambda audio_array, **kwargs: audio_array)
-    monkeypatch.setattr(
-        gt,
-        "_load_whisper_pipeline_with_fallback",
-        lambda model_name, *, device, compute_type: (
-            loader_calls.append((model_name, device, compute_type)) or None,
-            SimpleNamespace(transcribe=_cpu_transcribe),
-            "cpu",
-            "int8",
-        ),
-    )
-    monkeypatch.setattr(
-        gt,
-        "_queue_transcript_snapshot",
-        lambda target_queue, transcript, segments_data, **kwargs: captured_snapshots.append(
-            (transcript, segments_data)
-        ),
-    )
-
-    TranscriberGUI._transcribe_accumulated_audio(
-        fake_gui,
-        [0.1, -0.1, 0.2],
+        [0.1, -0.1],
         2,
-        TranscriptionConfig(whisper_model="large-v3"),
+        16000,
+        TranscriptionConfig(batch_backend="local_whisper"),
         GrammarConfig(enabled=False),
     )
 
-    assert loader_calls == [("large-v3", "cpu", "int8")]
-    assert fake_gui._whisper_device == "cpu"
-    assert fake_gui._loaded_compute_type == "int8"
-    assert captured_snapshots == [
-        (
-            "cpu retry transcript",
-            [make_transcript_segment(start=0.0, end=1.0, text="cpu retry transcript")],
-        )
-    ]
+    assert batch_calls == [str(temp_audio)]
+    assert not temp_audio.exists()
+    assert ("microphone_done", True) in _drain_queue(fake_gui.output_queue)
+
+
+def test_microphone_compare_mode_replaces_transcript_and_clears_segments(monkeypatch) -> None:
+    """Compare output should use local-file backend semantics for microphone recordings."""
+    queued_snapshots: list[tuple[str, object]] = []
+    monkeypatch.setattr(gt, "find_ffmpeg", lambda: "ffmpeg")
+    monkeypatch.setattr(gt, "is_openai_api_configured", lambda: True)
+    monkeypatch.setattr(
+        gt,
+        "transcribe_local_file_openai",
+        lambda **kwargs: ("openai text", [make_transcript_segment(start=0.0, end=1.0, text="openai text")]),
+    )
+    monkeypatch.setattr(
+        gt,
+        "transcribe_local_file",
+        lambda **kwargs: ("local text", [make_transcript_segment(start=0.0, end=1.0, text="local text")]),
+    )
+    monkeypatch.setattr(
+        gt,
+        "_queue_transcript_snapshot",
+        lambda target_queue, transcript, segments_data, **kwargs: queued_snapshots.append((transcript, segments_data)),
+    )
+    monkeypatch.setattr(gt, "unload_gector", lambda: None)
+    monkeypatch.setattr(gt, "get_torch", lambda context: None)
+
+    fake_gui = cast(
+        Any,
+        SimpleNamespace(
+            output_queue=queue.Queue(),
+            theme=SimpleNamespace(colors=SimpleNamespace(warning="#f90", success_light="#0f0")),
+            _build_reusable_whisper_execution_state=lambda transcription_config: (None, "large-v3", "cpu", "int8"),
+        ),
+    )
+
+    success = TranscriberGUI._transcribe_batch_media_file(
+        fake_gui,
+        file_path="recording.wav",
+        transcription_config=TranscriptionConfig(batch_backend="compare"),
+        grammar_config=GrammarConfig(enabled=False),
+        source_label="microphone",
+        openai_status="Transcribing microphone recording with OpenAI...",
+        openai_progress="Preparing microphone audio for OpenAI transcription...\n",
+        whisper_reuse_progress="Reusing the loaded Whisper runtime for microphone transcription...\n",
+        cuda_retry_progress_prefix="CUDA ran out of memory during microphone transcription",
+    )
+
+    assert success is True
+    assert queued_snapshots == [("=== OpenAI ===\nopenai text\n\n=== Local Whisper ===\nlocal text", None)]
+
+
+def test_record_audio_thread_emits_captured_audio(monkeypatch) -> None:
+    """The microphone thread should capture samples and queue them for post-stop transcription."""
+    class _FakeCallbackStop(Exception):
+        pass
+
+    class _FakeInputStream:
+        def __init__(self, *, callback, **kwargs) -> None:
+            self.callback = callback
+
+        def __enter__(self):
+            self.callback(np.asarray([[0.25], [-0.5]], dtype=np.float32), 2, None, None)
+            fake_gui._recording_stop_event.set()
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> None:
+            return None
+
+    fake_sounddevice = SimpleNamespace(
+        CallbackStop=_FakeCallbackStop,
+        PortAudioError=RuntimeError,
+        query_devices=lambda *args, **kwargs: [
+            {"name": "Mic", "max_input_channels": 1, "default_samplerate": 16000}
+        ] if not args else {"name": "Mic", "max_input_channels": 1, "default_samplerate": 16000},
+        InputStream=_FakeInputStream,
+    )
+    fake_gui = cast(
+        Any,
+        SimpleNamespace(
+            output_queue=queue.Queue(),
+            _recording_stop_event=threading.Event(),
+            _audio_buffer_lock=threading.Lock(),
+            _accumulated_audio_buffer=[],
+            _recording_sample_rate=16000,
+        ),
+    )
+    monkeypatch.setattr(gt, "_get_sounddevice_module", lambda: fake_sounddevice)
+
+    TranscriberGUI.record_audio_thread(fake_gui, "0: Mic")
+
+    messages = _drain_queue(fake_gui.output_queue)
+    captured = [message for message in messages if message[0] == "recording_captured"]
+    assert len(captured) == 1
+    assert captured[0][1] == [0.25, -0.5]
+    assert captured[0][3] == 16000
+    assert ("recording_thread_done", "") in messages
 
 
 def test_check_dependencies_on_startup_runs_off_main_gpu_probe(monkeypatch) -> None:
@@ -1003,6 +879,8 @@ def test_process_queue_recording_reset_clears_timer_and_capture_state() -> None:
     timer_stops: list[str] = []
     label_visibility: list[bool] = []
     label_clears: list[str] = []
+    record_enabled: list[bool] = []
+    mic_enabled: list[bool] = []
     stop_event = threading.Event()
 
     fake_gui = cast(
@@ -1022,6 +900,8 @@ def test_process_queue_recording_reset_clears_timer_and_capture_state() -> None:
                 clear=lambda: label_clears.append("clear"),
                 setVisible=lambda visible: label_visibility.append(visible),
             ),
+            record_button=SimpleNamespace(setEnabled=lambda enabled: record_enabled.append(enabled)),
+            _set_microphone_selection_enabled=lambda enabled: mic_enabled.append(enabled),
             _set_record_button_state=lambda *, recording: record_button_states.append(recording),
         ),
     )
@@ -1039,265 +919,8 @@ def test_process_queue_recording_reset_clears_timer_and_capture_state() -> None:
     assert timer_stops == ["stop"]
     assert label_clears == ["clear"]
     assert label_visibility == [False]
-
-
-def test_realtime_recording_waits_for_receiver_final_completed_event(monkeypatch) -> None:
-    """Stopping realtime recording should wait for the receiver to publish the final completed turn."""
-    event_queue: queue.Queue[dict[str, object]] = queue.Queue()
-    appended_pcm: list[bytes] = []
-    pcm_chunk = b"p" * OPENAI_REALTIME_MIN_COMMIT_AUDIO_BYTES
-
-    class _FakeRealtimeSession:
-        def __init__(self, **kwargs) -> None:
-            pass
-
-        def connect(self) -> None:
-            pass
-
-        def append_pcm16(self, pcm_bytes: bytes) -> None:
-            appended_pcm.append(pcm_bytes)
-            threading.Timer(
-                0.05,
-                lambda: event_queue.put(
-                    {
-                        "type": "conversation.item.input_audio_transcription.completed",
-                        "item_id": "final",
-                        "transcript": "final words",
-                    }
-                ),
-            ).start()
-
-        def commit(self) -> None:
-            raise AssertionError("server VAD owns realtime audio commits")
-
-        def recv_event(self) -> dict[str, object] | None:
-            try:
-                return event_queue.get(timeout=0.01)
-            except queue.Empty:
-                return None
-
-        def close(self) -> None:
-            pass
-
-    class _FakeInputStream:
-        def __init__(self, *, callback, **kwargs) -> None:
-            self.callback = callback
-
-        def __enter__(self):
-            self.callback(object(), 1, None, None)
-            fake_gui._recording_stop_event.set()
-            return self
-
-        def __exit__(self, exc_type, exc, tb) -> None:
-            return None
-
-    fake_sounddevice = SimpleNamespace(
-        CallbackStop=RuntimeError,
-        query_devices=lambda *args, **kwargs: {"default_samplerate": gt.OPENAI_REALTIME_INPUT_SAMPLE_RATE},
-        InputStream=_FakeInputStream,
-    )
-    fake_gui = cast(
-        Any,
-        SimpleNamespace(
-            output_queue=queue.Queue(),
-            theme=SimpleNamespace(colors=SimpleNamespace(warning="#f90", success_light="#0f0")),
-            config=SimpleNamespace(
-                recording=SimpleNamespace(
-                    openai_realtime_session_model="gpt-realtime-test",
-                    openai_realtime_transcription_model="gpt-4o-transcribe-test",
-                )
-            ),
-            _recording_stop_event=threading.Event(),
-            _build_transcription_config=lambda: TranscriptionConfig(language="en"),
-            _build_openai_realtime_prompt=lambda transcription_config: None,
-            _pcm16_bytes_from_float_audio=lambda audio, *, sample_rate: pcm_chunk,
-        ),
-    )
-
-    monkeypatch.setattr(gt, "_get_sounddevice_module", lambda: fake_sounddevice)
-    monkeypatch.setattr(gt, "OpenAIRealtimeTranscriptionSession", _FakeRealtimeSession)
-    monkeypatch.setattr(gt, "OPENAI_REALTIME_FINALIZATION_TIMEOUT_S", 0.5)
-    monkeypatch.setattr(gt, "OPENAI_REALTIME_FINALIZATION_POLL_S", 0.01)
-
-    TranscriberGUI.record_audio_openai_realtime_thread(fake_gui, "0: mic")
-
-    messages = _drain_queue(fake_gui.output_queue)
-    realtime_messages = [message[1] for message in messages if message[0] == "realtime_transcript"]
-    segment_messages = [message[1] for message in messages if message[0] == "segments"]
-    final_segments = cast(list[dict[str, object]], segment_messages[-1])
-
-    assert appended_pcm == [pcm_chunk]
-    assert realtime_messages[-1] == "final words"
-    assert final_segments[0]["text"] == "final words"
-
-
-def test_realtime_recording_reports_finalization_timeout(monkeypatch) -> None:
-    pcm_chunk = b"p" * OPENAI_REALTIME_MIN_COMMIT_AUDIO_BYTES
-
-    class _FakeRealtimeSession:
-        def __init__(self, **kwargs) -> None:
-            pass
-
-        def connect(self) -> None:
-            pass
-
-        def append_pcm16(self, pcm_bytes: bytes) -> None:
-            pass
-
-        def commit(self) -> None:
-            raise AssertionError("server VAD owns realtime audio commits")
-
-        def recv_event(self) -> dict[str, object] | None:
-            return None
-
-        def close(self) -> None:
-            pass
-
-    class _FakeInputStream:
-        def __init__(self, *, callback, **kwargs) -> None:
-            self.callback = callback
-
-        def __enter__(self):
-            self.callback(object(), 1, None, None)
-            fake_gui._recording_stop_event.set()
-            return self
-
-        def __exit__(self, exc_type, exc, tb) -> None:
-            return None
-
-    fake_sounddevice = SimpleNamespace(
-        CallbackStop=RuntimeError,
-        query_devices=lambda *args, **kwargs: {"default_samplerate": gt.OPENAI_REALTIME_INPUT_SAMPLE_RATE},
-        InputStream=_FakeInputStream,
-    )
-    fake_gui = cast(
-        Any,
-        SimpleNamespace(
-            output_queue=queue.Queue(),
-            theme=SimpleNamespace(colors=SimpleNamespace(warning="#f90", success_light="#0f0")),
-            config=SimpleNamespace(
-                recording=SimpleNamespace(
-                    openai_realtime_session_model="gpt-realtime-test",
-                    openai_realtime_transcription_model="gpt-4o-transcribe-test",
-                )
-            ),
-            _recording_stop_event=threading.Event(),
-            _build_transcription_config=lambda: TranscriptionConfig(language="en"),
-            _build_openai_realtime_prompt=lambda transcription_config: None,
-            _pcm16_bytes_from_float_audio=lambda audio, *, sample_rate: pcm_chunk,
-        ),
-    )
-
-    monkeypatch.setattr(gt, "_get_sounddevice_module", lambda: fake_sounddevice)
-    monkeypatch.setattr(gt, "OpenAIRealtimeTranscriptionSession", _FakeRealtimeSession)
-    monkeypatch.setattr(gt, "OPENAI_REALTIME_FINALIZATION_TIMEOUT_S", 0.02)
-    monkeypatch.setattr(gt, "OPENAI_REALTIME_FINALIZATION_POLL_S", 0.005)
-
-    TranscriberGUI.record_audio_openai_realtime_thread(fake_gui, "0: mic")
-
-    messages = _drain_queue(fake_gui.output_queue)
-    assert ("progress", "Timed out waiting for OpenAI realtime final transcription.\n") in messages
-    assert any(message[0] == "status" and isinstance(message[1], str) and "stopped" in message[1] for message in messages)
-
-
-def test_realtime_recording_preserves_partial_transcript_when_connection_closes(monkeypatch) -> None:
-    pcm_chunk = b"p" * OPENAI_REALTIME_MIN_COMMIT_AUDIO_BYTES
-    appended_pcm: list[tuple[int, bytes]] = []
-    sessions: list[object] = []
-    recv_count = 0
-
-    class _FakeCallbackStop(Exception):
-        pass
-
-    class _FakeRealtimeSession:
-        def __init__(self, **kwargs) -> None:
-            self.index = len(sessions)
-            sessions.append(self)
-
-        def connect(self) -> None:
-            if self.index == 1:
-                threading.Timer(0.02, fake_gui._recording_stop_event.set).start()
-
-        def append_pcm16(self, pcm_bytes: bytes) -> None:
-            appended_pcm.append((self.index, pcm_bytes))
-
-        def commit(self) -> None:
-            raise AssertionError("server VAD owns realtime audio commits")
-
-        def recv_event(self) -> dict[str, object] | None:
-            nonlocal recv_count
-            recv_count += 1
-            if recv_count == 1:
-                return {
-                    "type": "conversation.item.input_audio_transcription.delta",
-                    "item_id": "current",
-                    "delta": "kept partial words",
-                }
-            if self.index == 0:
-                raise RuntimeError("Connection to remote host was lost.")
-            return None
-
-        def close(self) -> None:
-            pass
-
-    class _FakeInputStream:
-        def __init__(self, *, callback, **kwargs) -> None:
-            self.callback = callback
-
-        def __enter__(self):
-            try:
-                self.callback(object(), 1, None, None)
-            except _FakeCallbackStop:
-                pass
-            return self
-
-        def __exit__(self, exc_type, exc, tb) -> None:
-            return None
-
-    fake_sounddevice = SimpleNamespace(
-        CallbackStop=_FakeCallbackStop,
-        query_devices=lambda *args, **kwargs: {"default_samplerate": gt.OPENAI_REALTIME_INPUT_SAMPLE_RATE},
-        InputStream=_FakeInputStream,
-    )
-    fake_gui = cast(
-        Any,
-        SimpleNamespace(
-            output_queue=queue.Queue(),
-            theme=SimpleNamespace(colors=SimpleNamespace(warning="#f90", success_light="#0f0")),
-            config=SimpleNamespace(
-                recording=SimpleNamespace(
-                    openai_realtime_session_model="gpt-realtime-test",
-                    openai_realtime_transcription_model="gpt-4o-transcribe-test",
-                )
-            ),
-            _recording_stop_event=threading.Event(),
-            _build_transcription_config=lambda: TranscriptionConfig(language="en"),
-            _build_openai_realtime_prompt=lambda transcription_config: None,
-            _pcm16_bytes_from_float_audio=lambda audio, *, sample_rate: pcm_chunk,
-        ),
-    )
-
-    monkeypatch.setattr(gt, "_get_sounddevice_module", lambda: fake_sounddevice)
-    monkeypatch.setattr(gt, "OpenAIRealtimeTranscriptionSession", _FakeRealtimeSession)
-    monkeypatch.setattr(gt, "OPENAI_REALTIME_FINALIZATION_TIMEOUT_S", 0.02)
-    monkeypatch.setattr(gt, "OPENAI_REALTIME_FINALIZATION_POLL_S", 0.005)
-
-    TranscriberGUI.record_audio_openai_realtime_thread(fake_gui, "0: mic")
-
-    messages = _drain_queue(fake_gui.output_queue)
-    assert len(sessions) >= 2
-    assert all(chunk == pcm_chunk for _session_index, chunk in appended_pcm)
-    assert not [message for message in messages if message[0] == "error"]
-    reconnecting_message = "OpenAI realtime connection closed; kept transcript received so far. Reconnecting..."
-    assert any(
-        message[0] == "progress" and reconnecting_message in str(message[1])
-        for message in messages
-    )
-    assert ("progress", "OpenAI realtime reconnected; continuing live transcription.\n") in messages
-    assert ("realtime_transcript", "kept partial words") in messages
-    segment_messages = [message[1] for message in messages if message[0] == "segments"]
-    final_segments = cast(list[dict[str, object]], segment_messages[-1])
-    assert final_segments[0]["text"] == "kept partial words"
+    assert record_enabled == [True]
+    assert mic_enabled == [True]
 
 
 def test_process_queue_transcribe_finished_requires_success_flag() -> None:

@@ -20,9 +20,11 @@ from pathlib import Path
 import queue
 import re
 import sys
+import tempfile
 import threading
 import time
 import warnings
+import wave
 from io import StringIO
 from logging.handlers import RotatingFileHandler
 from typing import Any, Optional, cast
@@ -36,14 +38,10 @@ from PyQt6 import QtCore, QtGui, QtWidgets
 
 # WhisperModel imported lazily in load_whisper_model() to speed up GUI startup
 
-from audio_preprocessor import preprocess_array
 from youtube_transcriber import (
     _WhisperExecutionState,
-    _build_runtime_transcribe_kwargs,
     _load_whisper_pipeline_with_fallback,
     _needs_cuda_cpu_fallback,
-    _normalize_transcript_segments,
-    build_suspicion_retry_kwargs,
     check_dependencies,
     download_audio,
     extract_video_id,
@@ -58,7 +56,6 @@ from youtube_transcriber import (
     transcribe_audio_openai,
     transcribe_local_file,
     transcribe_local_file_openai,
-    transcription_result_looks_suspicious,
     validate_youtube_url,
     get_whisper_cuda_status,
     get_whisper_device_and_compute_type,
@@ -81,12 +78,8 @@ from config import (
     save_config,
 )
 from grammar_postprocessor import check_grammar_status, post_process_grammar, unload_gector
-from openai_realtime import (
-    OPENAI_REALTIME_INPUT_SAMPLE_RATE,
-    OpenAIRealtimeTranscriptionSession,
-)
 from themes import get_theme_manager
-from transcript_types import TranscriptSegments, make_transcript_segment
+from transcript_types import TranscriptSegments
 from widgets import (
     MaterialCard,
     GlassCard,
@@ -98,10 +91,6 @@ from widgets import (
 warnings.filterwarnings("ignore", message="pkg_resources is deprecated", category=UserWarning)
 # Suppress PyTorch CUDA compatibility warning for RTX 5080 (sm_120 Blackwell)
 warnings.filterwarnings("ignore", message=".*CUDA capability sm_120.*", category=UserWarning)
-
-OPENAI_REALTIME_FINALIZATION_TIMEOUT_S = 10.0
-OPENAI_REALTIME_FINALIZATION_POLL_S = 0.1
-
 
 TRANSCRIPTION_SETTING_HELP_TEXTS: dict[str, str] = {
     "Preset:": (
@@ -271,28 +260,6 @@ def _get_sounddevice_module():
     import sounddevice
 
     return sounddevice
-
-
-def _resample_audio_for_whisper(
-    audio: np.ndarray,
-    *,
-    source_rate: int,
-    target_rate: int = WHISPER_SAMPLE_RATE,
-) -> np.ndarray:
-    """Resample recorded audio to Whisper's expected sample rate."""
-    if source_rate <= 0 or target_rate <= 0 or source_rate == target_rate or audio.size == 0:
-        return audio.astype(np.float32, copy=False)
-    if audio.size == 1:
-        return np.repeat(audio.astype(np.float32, copy=False), max(target_rate // source_rate, 1))
-
-    target_length = max(round(audio.size * (target_rate / source_rate)), 1)
-    if target_length == audio.size:
-        return audio.astype(np.float32, copy=False)
-
-    source_positions = np.arange(audio.size, dtype=np.float64)
-    target_positions = np.linspace(0, audio.size - 1, num=target_length)
-    resampled = np.interp(target_positions, source_positions, audio.astype(np.float64, copy=False))
-    return resampled.astype(np.float32, copy=False)
 
 
 @dataclass(frozen=True)
@@ -591,7 +558,7 @@ def _build_transcription_complete_status(
 
 
 class TranscriberGUI(QtWidgets.QMainWindow):
-    """PyQt6-based GUI for transcription and OpenAI realtime microphone capture."""
+    """PyQt6-based GUI for YouTube, local-file, and recorded microphone transcription."""
 
     def __init__(self) -> None:
         super().__init__()
@@ -1088,7 +1055,7 @@ class TranscriberGUI(QtWidgets.QMainWindow):
 
         # Record button and status
         self.record_button = MaterialButton("Start Recording", "success")
-        self.record_status_label = QtWidgets.QLabel("Live OpenAI realtime transcription")
+        self.record_status_label = QtWidgets.QLabel("Record, then transcribe with selected backend")
         self.record_status_label.setStyleSheet(self.theme.get_recording_status_style(is_recording=False))
 
         self._set_record_button_state(recording=False)
@@ -1672,9 +1639,16 @@ class TranscriberGUI(QtWidgets.QMainWindow):
         else:
             self.record_button.setText("Start Recording")
             self.record_button.setVariant("success")
-            self.record_button.setToolTip("Start live OpenAI speech-to-text (Ctrl+R)")
-            self.record_status_label.setText("Live OpenAI realtime transcription")
+            self.record_button.setToolTip("Record microphone audio for batch transcription (Ctrl+R)")
+            self.record_status_label.setText("Record, then transcribe with selected backend")
             self.record_status_label.setStyleSheet(self.theme.get_recording_status_style(is_recording=False))
+
+    def _set_microphone_selection_enabled(self, enabled: bool) -> None:
+        """Enable or disable microphone selection controls while capture/transcription is active."""
+        for attr_name in ("mic_combo", "auto_mic_button", "refresh_mics_button"):
+            widget = getattr(self, attr_name, None)
+            if widget is not None:
+                widget.setEnabled(enabled)
 
     def _connect_signals(self) -> None:
         """Connect UI signals to handlers."""
@@ -2237,149 +2211,17 @@ class TranscriberGUI(QtWidgets.QMainWindow):
                 self.output_queue.put(("status", "Preparing local file...", self.theme.colors.warning))
                 self.output_queue.put(("progress", f"Selected file: {file_path}\n"))
                 self.output_queue.put(("progress", "Inspecting local file and runtime settings...\n"))
-
-                ffmpeg_location = find_ffmpeg()
-                backend = transcription_config.batch_backend
-
-                def _run_local_whisper() -> tuple[str, TranscriptSegments]:
-                    self.output_queue.put(("progress", "Freeing GPU memory...\n"))
-                    unload_gector()
-                    torch_module = get_torch(context="gui_transcriber:file_empty_cache")
-                    if torch_module is not None and torch_module.cuda.is_available():
-                        torch_module.cuda.empty_cache()
-
-                    (
-                        reusable_execution_state,
-                        requested_model_name,
-                        requested_device,
-                        requested_compute_type,
-                    ) = TranscriberGUI._build_reusable_whisper_execution_state(self, transcription_config)
-                    captured_execution_state: list[_WhisperExecutionState] = []
-                    if reusable_execution_state is not None:
-                        self.output_queue.put(
-                            (
-                                "progress",
-                                "Reusing the loaded Whisper runtime for local-file transcription...\n",
-                            )
-                        )
-                        self.output_queue.put(
-                            ("status", "Preparing audio and reusing Whisper...", self.theme.colors.warning)
-                        )
-                    else:
-                        self.output_queue.put(
-                            ("status", "Preparing audio and loading Whisper...", self.theme.colors.warning)
-                        )
-
-                    try:
-                        try:
-                            return transcribe_local_file(
-                                file_path=file_path,
-                                ffmpeg_location=ffmpeg_location,
-                                config=transcription_config,
-                                execution_state=reusable_execution_state,
-                                execution_state_observer=(
-                                    captured_execution_state.append if reusable_execution_state is not None else None
-                                ),
-                            )
-                        finally:
-                            if captured_execution_state:
-                                previous_device = getattr(self, "_whisper_device", "cpu")
-                                TranscriberGUI._sync_loaded_whisper_execution_state(
-                                    self,
-                                    captured_execution_state[-1],
-                                    requested_model_name=requested_model_name,
-                                    requested_device=requested_device,
-                                    requested_compute_type=requested_compute_type,
-                                )
-                                if previous_device == "cuda" and self._whisper_device == "cpu":
-                                    self.output_queue.put(("gpu_status", ("cpu", "")))
-                    except Exception as exc:
-                        if transcription_config.device_preference != "cpu" and _needs_cuda_cpu_fallback(exc):
-                            cpu_config = self._build_cpu_recovery_transcription_config(transcription_config)
-                            self.output_queue.put(
-                                (
-                                    "progress",
-                                    "CUDA ran out of memory during local-file transcription; "
-                                    f"retrying full job on CPU (INT8, batch {cpu_config.batch_size})...\n",
-                                )
-                            )
-                            self.output_queue.put(
-                                ("status", "Retrying local transcription on CPU...", self.theme.colors.warning)
-                            )
-                            return transcribe_local_file(
-                                file_path=file_path,
-                                ffmpeg_location=ffmpeg_location,
-                                config=cpu_config,
-                            )
-                        raise
-
-                if backend in {"openai", "compare"} and not is_openai_api_configured():
-                    self.output_queue.put(("error", "OPENAI_API_KEY is not set. Rotate the exposed key and set a fresh key."))
-                    return
-
-                if backend == "openai":
-                    self.output_queue.put(("status", "Transcribing local file with OpenAI...", self.theme.colors.warning))
-                    self.output_queue.put(("progress", "Preparing local media for OpenAI transcription...\n"))
-                    transcript, segments_data = transcribe_local_file_openai(
-                        file_path=file_path,
-                        ffmpeg_location=ffmpeg_location,
-                        config=transcription_config,
-                    )
-                elif backend == "compare":
-                    self.output_queue.put(("status", "Comparing OpenAI and local Whisper...", self.theme.colors.warning))
-                    self.output_queue.put(("progress", "Running OpenAI transcription first...\n"))
-                    openai_transcript, _openai_segments = transcribe_local_file_openai(
-                        file_path=file_path,
-                        ffmpeg_location=ffmpeg_location,
-                        config=transcription_config,
-                    )
-                    self.output_queue.put(("progress", "Running local Whisper transcription for comparison...\n"))
-                    local_transcript, _local_segments = _run_local_whisper()
-                    transcript = _format_backend_comparison(
-                        openai_transcript=openai_transcript,
-                        local_transcript=local_transcript,
-                    )
-                    segments_data = None
-                else:
-                    transcript, segments_data = _run_local_whisper()
-
-                if transcript.strip():
-                    grammar_enhanced = False
-                    if grammar_config.enabled and transcription_config.batch_backend == "compare":
-                        self.output_queue.put(("progress", "Grammar correction skipped in Compare mode to preserve raw backend outputs.\n"))
-                    elif grammar_config.enabled:
-                        grammar_result = _apply_optional_grammar_corrections(
-                            self.output_queue,
-                            transcript,
-                            segments_data if segments_data else [],
-                            grammar_config,
-                            warning_color=self.theme.colors.warning,
-                            start_status="Applying grammar corrections...",
-                        )
-                        if grammar_result.completed:
-                            transcript = grammar_result.transcript
-                            segments_data = grammar_result.segments_data
-                            grammar_enhanced = grammar_result.grammar_enhanced
-
-                    _queue_transcript_snapshot(self.output_queue, transcript, segments_data)
-                    transcription_succeeded = True
-
-                    status_msg = _build_transcription_complete_status(
-                        grammar_enhanced=grammar_enhanced,
-                        segment_count=len(segments_data) if segments_data else None,
-                    )
-                    self.output_queue.put(("status", status_msg, self.theme.colors.success_light))
-                    gui_logger.info(f"\nTranscription saved. Words: {len(transcript.split())}")
-                else:
-                    _queue_transcript_snapshot(self.output_queue, transcript, segments_data)
-                    segment_count = len(segments_data) if segments_data else 0
-                    self.output_queue.put(
-                        (
-                            "status",
-                            f"No speech detected (returned {segment_count} segments). Check the progress log for audio-track/VAD details.",
-                            self.theme.colors.warning,
-                        )
-                    )
+                transcription_succeeded = TranscriberGUI._transcribe_batch_media_file(
+                    self,
+                    file_path=file_path,
+                    transcription_config=transcription_config,
+                    grammar_config=grammar_config,
+                    source_label="local file",
+                    openai_status="Transcribing local file with OpenAI...",
+                    openai_progress="Preparing local media for OpenAI transcription...\n",
+                    whisper_reuse_progress="Reusing the loaded Whisper runtime for local-file transcription...\n",
+                    cuda_retry_progress_prefix="CUDA ran out of memory during local-file transcription",
+                )
 
         except Exception as exc:
             gui_logger.error(f"Local file transcription error: {exc}", exc_info=True)
@@ -2387,6 +2229,151 @@ class TranscriberGUI(QtWidgets.QMainWindow):
         finally:
             self.output_queue.put(("transcribe_finished", transcription_succeeded))
             self.output_queue.put(("local_file_done", transcription_succeeded))
+
+    def _transcribe_batch_media_file(
+        self,
+        *,
+        file_path: str,
+        transcription_config: TranscriptionConfig,
+        grammar_config: GrammarConfig,
+        source_label: str,
+        openai_status: str,
+        openai_progress: str,
+        whisper_reuse_progress: str,
+        cuda_retry_progress_prefix: str,
+    ) -> bool:
+        """Run one media file through the shared OpenAI/local/compare batch workflow."""
+        ffmpeg_location = find_ffmpeg()
+        backend = transcription_config.batch_backend
+
+        def _run_local_whisper() -> tuple[str, TranscriptSegments]:
+            self.output_queue.put(("progress", "Freeing GPU memory...\n"))
+            unload_gector()
+            torch_module = get_torch(context="gui_transcriber:file_empty_cache")
+            if torch_module is not None and torch_module.cuda.is_available():
+                torch_module.cuda.empty_cache()
+
+            (
+                reusable_execution_state,
+                requested_model_name,
+                requested_device,
+                requested_compute_type,
+            ) = TranscriberGUI._build_reusable_whisper_execution_state(self, transcription_config)
+            captured_execution_state: list[_WhisperExecutionState] = []
+            if reusable_execution_state is not None:
+                self.output_queue.put(("progress", whisper_reuse_progress))
+                self.output_queue.put(("status", "Preparing audio and reusing Whisper...", self.theme.colors.warning))
+            else:
+                self.output_queue.put(("status", "Preparing audio and loading Whisper...", self.theme.colors.warning))
+
+            try:
+                try:
+                    return transcribe_local_file(
+                        file_path=file_path,
+                        ffmpeg_location=ffmpeg_location,
+                        config=transcription_config,
+                        execution_state=reusable_execution_state,
+                        execution_state_observer=(
+                            captured_execution_state.append if reusable_execution_state is not None else None
+                        ),
+                    )
+                finally:
+                    if captured_execution_state:
+                        previous_device = getattr(self, "_whisper_device", "cpu")
+                        TranscriberGUI._sync_loaded_whisper_execution_state(
+                            self,
+                            captured_execution_state[-1],
+                            requested_model_name=requested_model_name,
+                            requested_device=requested_device,
+                            requested_compute_type=requested_compute_type,
+                        )
+                        if previous_device == "cuda" and self._whisper_device == "cpu":
+                            self.output_queue.put(("gpu_status", ("cpu", "")))
+            except Exception as exc:
+                if transcription_config.device_preference != "cpu" and _needs_cuda_cpu_fallback(exc):
+                    cpu_config = self._build_cpu_recovery_transcription_config(transcription_config)
+                    self.output_queue.put(
+                        (
+                            "progress",
+                            f"{cuda_retry_progress_prefix}; "
+                            f"retrying full job on CPU (INT8, batch {cpu_config.batch_size})...\n",
+                        )
+                    )
+                    self.output_queue.put(("status", "Retrying local transcription on CPU...", self.theme.colors.warning))
+                    return transcribe_local_file(
+                        file_path=file_path,
+                        ffmpeg_location=ffmpeg_location,
+                        config=cpu_config,
+                    )
+                raise
+
+        if backend in {"openai", "compare"} and not is_openai_api_configured():
+            self.output_queue.put(("error", "OPENAI_API_KEY is not set. Rotate the exposed key and set a fresh key."))
+            return False
+
+        if backend == "openai":
+            self.output_queue.put(("status", openai_status, self.theme.colors.warning))
+            self.output_queue.put(("progress", openai_progress))
+            transcript, segments_data = transcribe_local_file_openai(
+                file_path=file_path,
+                ffmpeg_location=ffmpeg_location,
+                config=transcription_config,
+            )
+        elif backend == "compare":
+            self.output_queue.put(("status", "Comparing OpenAI and local Whisper...", self.theme.colors.warning))
+            self.output_queue.put(("progress", "Running OpenAI transcription first...\n"))
+            openai_transcript, _openai_segments = transcribe_local_file_openai(
+                file_path=file_path,
+                ffmpeg_location=ffmpeg_location,
+                config=transcription_config,
+            )
+            self.output_queue.put(("progress", "Running local Whisper transcription for comparison...\n"))
+            local_transcript, _local_segments = _run_local_whisper()
+            transcript = _format_backend_comparison(
+                openai_transcript=openai_transcript,
+                local_transcript=local_transcript,
+            )
+            segments_data = None
+        else:
+            transcript, segments_data = _run_local_whisper()
+
+        if transcript.strip():
+            grammar_enhanced = False
+            if grammar_config.enabled and transcription_config.batch_backend == "compare":
+                self.output_queue.put(("progress", "Grammar correction skipped in Compare mode to preserve raw backend outputs.\n"))
+            elif grammar_config.enabled:
+                grammar_result = _apply_optional_grammar_corrections(
+                    self.output_queue,
+                    transcript,
+                    segments_data if segments_data else [],
+                    grammar_config,
+                    warning_color=self.theme.colors.warning,
+                    start_status="Applying grammar corrections...",
+                )
+                if grammar_result.completed:
+                    transcript = grammar_result.transcript
+                    segments_data = grammar_result.segments_data
+                    grammar_enhanced = grammar_result.grammar_enhanced
+
+            _queue_transcript_snapshot(self.output_queue, transcript, segments_data)
+            status_msg = _build_transcription_complete_status(
+                grammar_enhanced=grammar_enhanced,
+                segment_count=len(segments_data) if segments_data else None,
+            )
+            self.output_queue.put(("status", status_msg, self.theme.colors.success_light))
+            gui_logger.info("%s transcription saved. Words: %d", source_label.capitalize(), len(transcript.split()))
+            return True
+
+        _queue_transcript_snapshot(self.output_queue, transcript, segments_data)
+        segment_count = len(segments_data) if segments_data else 0
+        self.output_queue.put(
+            (
+                "status",
+                f"No speech detected (returned {segment_count} segments). Check the progress log for audio-track/VAD details.",
+                self.theme.colors.warning,
+            )
+        )
+        return False
 
     def toggle_recording(self) -> None:
         """Toggle recording button state."""
@@ -2396,7 +2383,7 @@ class TranscriberGUI(QtWidgets.QMainWindow):
             self.stop_recording()
 
     def start_recording(self) -> None:
-        """Begin live OpenAI realtime transcription."""
+        """Begin microphone capture for post-stop batch transcription."""
         if self.is_recording:
             return
         active_transcription = getattr(self, "transcribe_thread", None)
@@ -2407,8 +2394,11 @@ class TranscriberGUI(QtWidgets.QMainWindow):
             self.update_status("Transcription already in progress", self.theme.colors.warning)
             return
 
-        if not is_openai_api_configured():
-            self.append_progress("OPENAI_API_KEY is not set. Rotate the exposed key and set a fresh key before using live transcription.\n")
+        transcription_config = self._build_transcription_config()
+        if transcription_config.batch_backend in {"openai", "compare"} and not is_openai_api_configured():
+            self.append_progress(
+                "OPENAI_API_KEY is not set. Rotate the exposed key and set a fresh key before using OpenAI transcription.\n"
+            )
             self.update_status("Missing OPENAI_API_KEY", self.theme.colors.error)
             return
 
@@ -2497,7 +2487,7 @@ class TranscriberGUI(QtWidgets.QMainWindow):
         self._loaded_compute_type = execution_state.compute_type
 
     def _start_recording_now(self) -> None:
-        """Begin live OpenAI realtime transcription."""
+        """Begin microphone capture."""
         if self.is_recording:
             return
 
@@ -2516,18 +2506,27 @@ class TranscriberGUI(QtWidgets.QMainWindow):
         self._recording_stop_event.clear()  # Clear stop signal for new recording
         self._set_record_button_state(recording=True)
         self.record_button.setEnabled(True)
+        self._set_microphone_selection_enabled(False)
         self._accumulated_audio_buffer = []
-        self._recording_sample_rate = OPENAI_REALTIME_INPUT_SAMPLE_RATE
+        self._recording_sample_rate = self.config.recording.sample_rate
 
         self._recording_start_time = time.time()
         self._recording_duration_seconds = 0
         self.recording_duration_label.setVisible(True)
         self.recording_timer.start()
 
-        self.append_progress("OpenAI realtime transcription in progress. Speak now; text will stream as turns complete.\n")
-        self.update_status(f"Live OpenAI transcription on: {mic_descriptor}", self.theme.colors.recording)
+        self.progress_output.clear()
+        transcription_config = self._build_transcription_config()
+        grammar_config = self._build_grammar_config()
+        self._append_runtime_summary(
+            source="Microphone",
+            transcription_config=transcription_config,
+            grammar_config=grammar_config,
+        )
+        self.append_progress("Recording microphone audio. Transcription will start after you stop recording.\n")
+        self.update_status(f"Recording microphone: {mic_descriptor}", self.theme.colors.recording)
 
-        thread = threading.Thread(target=self.record_audio_openai_realtime_thread, args=(mic_descriptor,), daemon=True)
+        thread = threading.Thread(target=self.record_audio_thread, args=(mic_descriptor,), daemon=True)
         self.recording_thread = thread
         try:
             thread.start()
@@ -2536,13 +2535,13 @@ class TranscriberGUI(QtWidgets.QMainWindow):
             self.output_queue.put(("status", "Ready"))
             self._set_record_button_state(recording=False)
             self.record_button.setEnabled(True)
-            self.mic_combo.setEnabled(True)
+            self._set_microphone_selection_enabled(True)
             self.is_recording = False
             self._reset_recording_ui_state()
             return
 
     def stop_recording(self) -> None:
-        """Stop live OpenAI realtime transcription."""
+        """Stop microphone capture and queue batch transcription."""
         if not self.is_recording:
             return
 
@@ -2551,9 +2550,10 @@ class TranscriberGUI(QtWidgets.QMainWindow):
             self.is_recording = False
 
         self._set_record_button_state(recording=False)
-        self._reset_recording_ui_state()
-        self.update_status("Stopping OpenAI realtime transcription...", self.theme.colors.warning)
-        self.append_progress("Stopping OpenAI realtime transcription and finalizing the last turn...\n")
+        self.record_button.setEnabled(False)
+        self.recording_timer.stop()
+        self.update_status("Stopping recording...", self.theme.colors.warning)
+        self.append_progress("Stopping recording and preparing batch transcription...\n")
 
     def load_whisper_model(
         self,
@@ -2651,7 +2651,7 @@ class TranscriberGUI(QtWidgets.QMainWindow):
             )
 
             if device == "cuda":
-                torch_module = get_torch(context="gui_transcriber:realtime_gpu_status")
+                torch_module = get_torch(context="gui_transcriber:whisper_gpu_status")
                 if torch_module is not None:
                     try:
                         gpu_name = torch_module.cuda.get_device_name(0)
@@ -2673,495 +2673,89 @@ class TranscriberGUI(QtWidgets.QMainWindow):
             self.output_queue.put(("model_load_failed", ""))
             self.output_queue.put(("error", f"Failed to load Whisper model: {exc}"))
 
-    def _transcribe_accumulated_audio(
+    def _write_recorded_audio_to_temp_wav(self, audio_buffer: list[float], sample_rate: int) -> str:
+        """Persist captured microphone samples to a caller-owned temporary WAV file."""
+        if sample_rate <= 0:
+            sample_rate = self.config.recording.sample_rate or WHISPER_SAMPLE_RATE
+        audio_array = np.asarray(audio_buffer, dtype=np.float32)
+        audio_array = np.nan_to_num(audio_array, nan=0.0, posinf=0.0, neginf=0.0)
+        pcm16 = (np.clip(audio_array, -1.0, 1.0) * 32767.0).astype("<i2")
+
+        temp_fd, temp_path = tempfile.mkstemp(prefix="microphone-recording-", suffix=".wav")
+        os.close(temp_fd)
+        with wave.open(temp_path, "wb") as wav_file:
+            wav_file.setnchannels(1)
+            wav_file.setsampwidth(2)
+            wav_file.setframerate(sample_rate)
+            wav_file.writeframes(pcm16.tobytes())
+        return temp_path
+
+    def _start_recorded_audio_transcription(
+        self,
+        *,
+        audio_buffer: list[float],
+        duration_seconds: int,
+        sample_rate: int,
+    ) -> None:
+        """Spawn the shared batch transcription worker for captured microphone audio."""
+        if not audio_buffer:
+            self.output_queue.put(("status", "No audio to transcribe", self.theme.colors.warning))
+            self.output_queue.put(("microphone_done", False))
+            return
+
+        transcription_config = self._build_transcription_config()
+        grammar_config = self._build_grammar_config()
+        thread = threading.Thread(
+            target=self.transcribe_recorded_audio_thread,
+            args=(audio_buffer, duration_seconds, sample_rate, transcription_config, grammar_config),
+            daemon=True,
+        )
+        self.transcribe_thread = thread
+        try:
+            thread.start()
+        except RuntimeError as exc:
+            self.output_queue.put(("error", f"Failed to start microphone transcription thread: {exc}"))
+            self.output_queue.put(("microphone_done", False))
+
+    def transcribe_recorded_audio_thread(
         self,
         audio_buffer: list[float],
         duration_seconds: int,
+        sample_rate: int,
         transcription_config: TranscriptionConfig,
         grammar_config: GrammarConfig,
-        capture_sample_rate: int | None = None,
-        _retrying: bool = False,
     ) -> None:
-        """Transcribe the full accumulated audio buffer after recording stops.
-
-        Args:
-            audio_buffer: List of audio samples.
-            duration_seconds: Duration of the recording in seconds.
-        """
+        """Background thread for post-stop microphone batch transcription."""
+        transcription_succeeded = False
+        temp_audio_path: str | None = None
         try:
-            if not self.whisper_model:
-                self.output_queue.put(("error", "Whisper model not loaded!"))
-                return
-
-            if not audio_buffer or len(audio_buffer) == 0:
-                self.output_queue.put(("status", "No audio to transcribe", self.theme.colors.warning))
-                return
-
-            audio_array = np.asarray(audio_buffer, dtype=np.float32)
-            source_sample_rate = capture_sample_rate or self.config.recording.sample_rate
-            if source_sample_rate <= 0:
-                source_sample_rate = WHISPER_SAMPLE_RATE
-
-            # Audio preprocessing (noise reduction + loudness normalization)
-            if transcription_config.noise_reduction_enabled or transcription_config.normalize_audio:
-                self.output_queue.put(("progress", "Preprocessing audio (noise reduction/normalization)...\n"))
-                audio_array = preprocess_array(
-                    audio_array,
-                    sample_rate=source_sample_rate,
-                    noise_reduction=transcription_config.noise_reduction_enabled,
-                    normalize=transcription_config.normalize_audio,
+            with _worker_queue_bridge(self.output_queue):
+                self.output_queue.put(("status", "Preparing microphone recording...", self.theme.colors.warning))
+                self.output_queue.put(("progress", f"Captured {duration_seconds}s of microphone audio at {sample_rate} Hz.\n"))
+                temp_audio_path = self._write_recorded_audio_to_temp_wav(audio_buffer, sample_rate)
+                self.output_queue.put(("progress", "Saved recording to a temporary WAV for batch transcription.\n"))
+                transcription_succeeded = self._transcribe_batch_media_file(
+                    file_path=temp_audio_path,
+                    transcription_config=transcription_config,
+                    grammar_config=grammar_config,
+                    source_label="microphone",
+                    openai_status="Transcribing microphone recording with OpenAI...",
+                    openai_progress="Preparing microphone audio for OpenAI transcription...\n",
+                    whisper_reuse_progress="Reusing the loaded Whisper runtime for microphone transcription...\n",
+                    cuda_retry_progress_prefix="CUDA ran out of memory during microphone transcription",
                 )
-
-            if source_sample_rate != WHISPER_SAMPLE_RATE:
-                self.output_queue.put(
-                    (
-                        "progress",
-                        f"Resampling recorded audio from {source_sample_rate} Hz to "
-                        f"{WHISPER_SAMPLE_RATE} Hz for Whisper...\n",
-                    )
-                )
-                audio_array = _resample_audio_for_whisper(
-                    audio_array,
-                    source_rate=source_sample_rate,
-                    target_rate=WHISPER_SAMPLE_RATE,
-                )
-
-            self.output_queue.put(("progress", f"\nTranscribing {duration_seconds}s of audio with Whisper...\n"))
-
-            batch_size = transcription_config.batch_size
-            device_for_batch = getattr(self, "_whisper_device", "cpu")
-            if device_for_batch == "cpu":
-                batch_size = min(batch_size, transcription_config.cpu_fallback_batch_size)
-            whisper_model = self.whisper_model
-            if whisper_model is None:
-                self.output_queue.put(("error", "Whisper model not loaded!"))
-                return
-
-            # Use the same shared Whisper kwargs as file and YouTube transcription.
-            transcribe_kwargs = _build_runtime_transcribe_kwargs(
-                transcription_config,
-                model_name=self._loaded_whisper_model_name or transcription_config.whisper_model,
-                device=device_for_batch,
-                compute_type=getattr(self, "_loaded_compute_type", None) or "int8",
-                context="Recording transcription",
-            )
-            transcribe_kwargs["batch_size"] = min(int(transcribe_kwargs["batch_size"]), batch_size)
-            candidate_duration = float(duration_seconds) if duration_seconds > 0 else None
-
-            def _decode_segments(kwargs: dict[str, Any]) -> TranscriptSegments:
-                segments, _info = whisper_model.transcribe(audio_array, **kwargs)
-                collected: TranscriptSegments = []
-                for segment in list(segments):
-                    progress = ((segment.end / candidate_duration) * 100) if candidate_duration else 0.0
-                    self.output_queue.put(
-                        (
-                            "progress",
-                            f"Recording decode: {progress:.1f}% | "
-                            f"[{segment.start:.1f}s - {segment.end:.1f}s] | "
-                            f"{segment.text.strip()}\n",
-                        )
-                    )
-                    collected.append(
-                        make_transcript_segment(start=segment.start, end=segment.end, text=segment.text.strip())
-                    )
-                return collected
-
-            def _normalize_candidate(
-                raw_segments: TranscriptSegments,
-            ) -> tuple[str, TranscriptSegments, int, int]:
-                return _normalize_transcript_segments(
-                    raw_segments,
-                    clean_fillers=transcription_config.clean_filler_words,
-                    filter_hallucinated=transcription_config.filter_hallucinations,
-                    deduplicate_repetitions=transcription_config.deduplicate_repeated_segments,
-                )
-
-            segments_data = _decode_segments(transcribe_kwargs)
-            final_transcript, segments_data, removed_count, hallucination_count = _normalize_candidate(
-                segments_data
-            )
-
-            rejected_unreliable_transcript = False
-            if transcription_result_looks_suspicious(segments_data, input_duration=candidate_duration):
-                self.output_queue.put(
-                    (
-                        "progress",
-                        "Initial microphone transcript looked suspicious; retrying with stricter anti-hallucination settings...\n",
-                    )
-                )
-                retry_kwargs = build_suspicion_retry_kwargs(transcribe_kwargs)
-                try:
-                    retry_segments_data = _decode_segments(retry_kwargs)
-                except RuntimeError:
-                    raise
-                except Exception as retry_exc:
-                    self.output_queue.put(
-                        (
-                            "progress",
-                            f"Retry failed, keeping first-pass transcript for evaluation: {retry_exc}\n",
-                        )
-                    )
-                else:
-                    final_transcript, segments_data, removed_count, hallucination_count = _normalize_candidate(
-                        retry_segments_data
-                    )
-
-                if transcription_result_looks_suspicious(segments_data, input_duration=candidate_duration):
-                    rejected_unreliable_transcript = True
-                    final_transcript = ""
-                    segments_data = []
-
-            if removed_count > 0:
-                self.output_queue.put(("progress", f"Removed {removed_count} repetitive segments\n"))
-
-            if hallucination_count > 0:
-                self.output_queue.put(("progress", f"Filtered {hallucination_count} hallucination segment(s)\n"))
-
-            if final_transcript:
-
-                # Grammar Post-Processing (if enabled)
-                grammar_enhanced = False
-                if grammar_config.enabled:
-                    grammar_result = _apply_optional_grammar_corrections(
-                        self.output_queue,
-                        final_transcript,
-                        segments_data,
-                        grammar_config,
-                    )
-                    final_transcript = grammar_result.transcript
-                    segments_data = grammar_result.segments_data
-                    grammar_enhanced = grammar_result.grammar_enhanced
-
-                word_count = len(final_transcript.split())
-
-                _queue_transcript_snapshot(
-                    self.output_queue,
-                    final_transcript,
-                    segments_data,
-                    append=True,
-                )
-                self.output_queue.put(("progress", f"Transcription complete: {word_count} words\n"))
-
-                status_msg = _build_transcription_complete_status(
-                    grammar_enhanced=grammar_enhanced,
-                    word_count=word_count,
-                )
-                self.output_queue.put(("status", status_msg, self.theme.colors.success_light))
-            else:
-                if hallucination_count > 0:
-                    self.output_queue.put(("progress", "Only hallucinations detected - no real speech found\n"))
-                    self.output_queue.put(("status", "No real speech detected (hallucinations filtered)", self.theme.colors.warning))
-                elif rejected_unreliable_transcript:
-                    self.output_queue.put(("progress", "Rejected unreliable microphone transcript after retry\n"))
-                    self.output_queue.put(("status", "No reliable speech detected", self.theme.colors.warning))
-                else:
-                    self.output_queue.put(("progress", "No speech detected in recording\n"))
-                    self.output_queue.put(("status", "No speech detected", self.theme.colors.warning))
-                self.output_queue.put(("segments", []))
-
-        except RuntimeError as exc:
-            if self._whisper_device == "cuda" and not _retrying:
-                self.output_queue.put(
-                    (
-                        "progress",
-                        f"Whisper runtime error on CUDA ({exc}); retrying microphone transcription on CPU...\n",
-                    )
-                )
-                try:
-                    model_name = self._loaded_whisper_model_name or transcription_config.whisper_model
-                    _base_model, pipeline, device, compute_type = _load_whisper_pipeline_with_fallback(
-                        model_name,
-                        device="cpu",
-                        compute_type="int8",
-                    )
-                    self.whisper_model = pipeline
-                    self._whisper_device = device
-                    self._loaded_compute_type = compute_type
-                    self.output_queue.put(("gpu_status", ("cpu", "")))
-                except Exception as reload_exc:
-                    self.output_queue.put(("error", f"Transcription error: {reload_exc}"))
-                    return
-                self._transcribe_accumulated_audio(
-                    audio_buffer,
-                    duration_seconds,
-                    transcription_config,
-                    grammar_config,
-                    capture_sample_rate,
-                    _retrying=True,
-                )
-            else:
-                self.output_queue.put(("error", f"Transcription error: {exc}"))
         except Exception as exc:
-            self.output_queue.put(("error", f"Transcription error: {exc}"))
+            gui_logger.error("Microphone transcription error: %s", exc, exc_info=True)
+            self.output_queue.put(("error", f"Error: {exc}"))
         finally:
-            self.output_queue.put(("transcribe_thread_done", ""))
-
-    def _build_openai_realtime_prompt(self, transcription_config: TranscriptionConfig) -> str | None:
-        prompt_parts: list[str] = []
-        if transcription_config.initial_prompt:
-            prompt_parts.append(transcription_config.initial_prompt.strip())
-        if transcription_config.hotwords:
-            hotwords = ", ".join(term.strip() for term in transcription_config.hotwords.split(",") if term.strip())
-            if hotwords:
-                prompt_parts.append(f"Vocabulary and names that may appear: {hotwords}.")
-        if not prompt_parts:
-            return None
-        return "\n".join(prompt_parts)
-
-    def _pcm16_bytes_from_float_audio(self, audio: np.ndarray, *, sample_rate: int) -> bytes:
-        mono = np.asarray(audio, dtype=np.float32)
-        if mono.ndim > 1:
-            mono = mono[:, 0]
-        if sample_rate != OPENAI_REALTIME_INPUT_SAMPLE_RATE and mono.size:
-            mono = _resample_audio_for_whisper(
-                mono,
-                source_rate=sample_rate,
-                target_rate=OPENAI_REALTIME_INPUT_SAMPLE_RATE,
-            )
-        mono = np.clip(mono, -1.0, 1.0)
-        return (mono * 32767.0).astype("<i2").tobytes()
-
-    def record_audio_openai_realtime_thread(self, mic_descriptor: str) -> None:
-        """Background loop streaming microphone audio to OpenAI Realtime."""
-        session: OpenAIRealtimeTranscriptionSession | None = None
-        receiver_thread: threading.Thread | None = None
-        receiver_stop_event = threading.Event()
-        receiver_finalized_event = threading.Event()
-        connection_lost_event = threading.Event()
-        audio_queue: queue.Queue[bytes] = queue.Queue(maxsize=80)
-        finalized_segments: TranscriptSegments = []
-        partial_by_item: dict[str, str] = {}
-        first_delta_at_by_item: dict[str, float] = {}
-        sent_audio_bytes = 0
-        started_at = time.time()
-
-        def _elapsed() -> float:
-            return max(0.0, time.time() - started_at)
-
-        def _render_live_transcript() -> str:
-            final_text = " ".join(str(segment["text"]).strip() for segment in finalized_segments if segment.get("text"))
-            partial_text = " ".join(text.strip() for text in partial_by_item.values() if text.strip())
-            if final_text and partial_text:
-                return f"{final_text} {partial_text}"
-            return final_text or partial_text
-
-        def _queue_live_snapshot() -> None:
-            self.output_queue.put(("realtime_transcript", _render_live_transcript()))
-            self.output_queue.put(("segments", list(finalized_segments)))
-
-        def _finalize_partial_items() -> bool:
-            promoted = False
-            end = _elapsed()
-            for item_id, text in list(partial_by_item.items()):
-                transcript = text.strip()
-                partial_by_item.pop(item_id, None)
-                start = min(first_delta_at_by_item.pop(item_id, end), end)
-                if not transcript:
-                    continue
-                finalized_segments.append(make_transcript_segment(start=start, end=end, text=transcript))
-                promoted = True
-            return promoted
-
-        def _is_remote_connection_lost(exc: Exception) -> bool:
-            class_name = type(exc).__name__.lower()
-            message = str(exc).lower()
-            return (
-                "websocketconnectionclosed" in class_name
-                or "connection to remote host was lost" in message
-                or "connection is already closed" in message
-                or "socket is already closed" in message
-            )
-
-        def _handle_remote_connection_lost(exc: Exception) -> None:
-            if connection_lost_event.is_set():
-                return
-            promoted = _finalize_partial_items()
-            connection_lost_event.set()
-            receiver_finalized_event.set()
-            if finalized_segments or promoted:
-                self.output_queue.put(
-                    ("progress", f"OpenAI realtime connection closed; kept transcript received so far. Reconnecting... ({exc})\n")
-                )
-            else:
-                self.output_queue.put(
-                    ("progress", f"OpenAI realtime connection closed before transcript data arrived. Reconnecting... ({exc})\n")
-                )
-            _queue_live_snapshot()
-
-        def _handle_realtime_event(event: dict[str, Any]) -> None:
-            event_type = str(event.get("type", ""))
-            if event_type == "conversation.item.input_audio_transcription.delta":
-                item_id = str(event.get("item_id") or "current")
-                delta = str(event.get("delta") or "")
-                if not delta:
-                    return
-                first_delta_at_by_item.setdefault(item_id, _elapsed())
-                partial_by_item[item_id] = f"{partial_by_item.get(item_id, '')}{delta}"
-                _queue_live_snapshot()
-            elif event_type == "conversation.item.input_audio_transcription.completed":
-                item_id = str(event.get("item_id") or "current")
-                transcript = str(event.get("transcript") or partial_by_item.get(item_id, "")).strip()
-                partial_by_item.pop(item_id, None)
-                if transcript:
-                    end = _elapsed()
-                    start = min(first_delta_at_by_item.pop(item_id, end), end)
-                    finalized_segments.append(make_transcript_segment(start=start, end=end, text=transcript))
-                    self.output_queue.put(("progress", f"OpenAI realtime turn: {transcript}\n"))
-                _queue_live_snapshot()
-                receiver_finalized_event.set()
-            elif event_type == "error":
-                error_payload = event.get("error")
-                message = error_payload.get("message") if isinstance(error_payload, dict) else str(error_payload)
-                self.output_queue.put(("error", f"OpenAI realtime error: {message}"))
-
-        def _receiver_loop(active_session: OpenAIRealtimeTranscriptionSession) -> None:
-            while not receiver_stop_event.is_set():
+            if temp_audio_path and os.path.exists(temp_audio_path):
                 try:
-                    event = active_session.recv_event()
-                except Exception as exc:
-                    if not receiver_stop_event.is_set() and _is_remote_connection_lost(exc):
-                        _handle_remote_connection_lost(exc)
-                        return
-                    if not receiver_stop_event.is_set() and not self._recording_stop_event.is_set():
-                        self.output_queue.put(("error", f"OpenAI realtime receive error: {exc}"))
-                    return
-                if event is not None:
-                    _handle_realtime_event(event)
+                    os.remove(temp_audio_path)
+                except OSError as cleanup_exc:
+                    gui_logger.warning("Could not delete temporary microphone recording %s: %s", temp_audio_path, cleanup_exc)
+            self.output_queue.put(("microphone_done", transcription_succeeded))
 
-        def _wait_for_realtime_finalization() -> bool:
-            deadline = time.monotonic() + OPENAI_REALTIME_FINALIZATION_TIMEOUT_S
-            while True:
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    return receiver_finalized_event.is_set()
-                if receiver_finalized_event.wait(min(OPENAI_REALTIME_FINALIZATION_POLL_S, remaining)):
-                    return True
-
-        try:
-            sd = _get_sounddevice_module()
-            try:
-                mic_index = int(mic_descriptor.split(":")[0]) if ":" in mic_descriptor else None
-            except (ValueError, IndexError) as exc:
-                self.output_queue.put(("error", f"Invalid microphone selection '{mic_descriptor}': {exc}"))
-                self.output_queue.put(("recording_reset", ""))
-                return
-
-            transcription_config = self._build_transcription_config()
-            realtime_prompt = self._build_openai_realtime_prompt(transcription_config)
-
-            def _build_realtime_session() -> OpenAIRealtimeTranscriptionSession:
-                return OpenAIRealtimeTranscriptionSession(
-                    session_model=self.config.recording.openai_realtime_session_model,
-                    transcription_model=self.config.recording.openai_realtime_transcription_model,
-                    language=transcription_config.language,
-                    prompt=realtime_prompt,
-                )
-
-            def _start_receiver_thread(active_session: OpenAIRealtimeTranscriptionSession) -> None:
-                nonlocal receiver_thread
-                receiver_thread = threading.Thread(target=_receiver_loop, args=(active_session,), daemon=True)
-                receiver_thread.start()
-
-            def _reconnect_realtime_session() -> None:
-                nonlocal session, receiver_thread
-                old_session = session
-                if old_session is not None:
-                    old_session.close()
-                if receiver_thread is not None and receiver_thread.is_alive():
-                    receiver_thread.join(timeout=2)
-                session = _build_realtime_session()
-                session.connect()
-                connection_lost_event.clear()
-                receiver_finalized_event.clear()
-                _start_receiver_thread(session)
-                self.output_queue.put(("progress", "OpenAI realtime reconnected; continuing live transcription.\n"))
-
-            session = _build_realtime_session()
-            session.connect()
-            _start_receiver_thread(session)
-
-            self.output_queue.put(("progress", f"Streaming microphone '{mic_descriptor}' to OpenAI Realtime\n"))
-            self.output_queue.put(
-                (
-                    "progress",
-                    "Realtime transcription: "
-                    f"mode=transcription | model={self.config.recording.openai_realtime_transcription_model}\n",
-                )
-            )
-
-            stream_sample_rate = OPENAI_REALTIME_INPUT_SAMPLE_RATE
-            try:
-                device_info = sd.query_devices(mic_index, "input") if mic_index is not None else sd.query_devices(kind="input")
-                default_rate = int(device_info.get("default_samplerate", stream_sample_rate))
-                if default_rate > 0:
-                    stream_sample_rate = default_rate
-            except Exception:
-                stream_sample_rate = OPENAI_REALTIME_INPUT_SAMPLE_RATE
-
-            self._recording_sample_rate = stream_sample_rate
-
-            def audio_callback(indata: np.ndarray, frames: int, time_info, status) -> None:
-                if status:
-                    self.output_queue.put(("progress", f"Audio status: {status}\n"))
-                if self._recording_stop_event.is_set():
-                    raise sd.CallbackStop()
-                pcm_bytes = self._pcm16_bytes_from_float_audio(indata, sample_rate=stream_sample_rate)
-                try:
-                    audio_queue.put_nowait(pcm_bytes)
-                except queue.Full:
-                    self.output_queue.put(("progress", "OpenAI realtime audio buffer is full; dropping a small chunk.\n"))
-
-            with sd.InputStream(device=mic_index, channels=1, samplerate=stream_sample_rate, callback=audio_callback):
-                while not self._recording_stop_event.is_set():
-                    if connection_lost_event.is_set():
-                        _reconnect_realtime_session()
-                        continue
-                    try:
-                        pcm_bytes = audio_queue.get(timeout=0.1)
-                    except queue.Empty:
-                        continue
-                    try:
-                        session.append_pcm16(pcm_bytes)
-                    except Exception as exc:
-                        if _is_remote_connection_lost(exc):
-                            _handle_remote_connection_lost(exc)
-                            continue
-                        raise
-                    sent_audio_bytes += len(pcm_bytes)
-
-                while not connection_lost_event.is_set() and not audio_queue.empty():
-                    pcm_bytes = audio_queue.get_nowait()
-                    try:
-                        session.append_pcm16(pcm_bytes)
-                    except Exception as exc:
-                        if _is_remote_connection_lost(exc):
-                            _handle_remote_connection_lost(exc)
-                            break
-                        raise
-                    sent_audio_bytes += len(pcm_bytes)
-
-            if connection_lost_event.is_set():
-                _queue_live_snapshot()
-            elif sent_audio_bytes > 0:
-                if not _wait_for_realtime_finalization():
-                    _finalize_partial_items()
-                    self.output_queue.put(("progress", "Timed out waiting for OpenAI realtime final transcription.\n"))
-            else:
-                self.output_queue.put(("progress", "OpenAI realtime recording ended before enough audio was captured.\n"))
-            _queue_live_snapshot()
-            self.output_queue.put(("status", "OpenAI realtime transcription stopped", self.theme.colors.success_light))
-        except Exception as exc:
-            self.output_queue.put(("error", f"OpenAI realtime recording error: {exc}"))
-            self.output_queue.put(("recording_reset", ""))
-        finally:
-            receiver_stop_event.set()
-            if session is not None:
-                session.close()
-            if receiver_thread is not None and receiver_thread.is_alive():
-                receiver_thread.join(timeout=2)
-            self.output_queue.put(("recording_thread_done", ""))
-
-    def record_audio_whisper_thread(self, mic_descriptor: str) -> None:
+    def record_audio_thread(self, mic_descriptor: str) -> None:
         """Background loop capturing audio."""
         try:
             sd = _get_sounddevice_module()
@@ -3213,7 +2807,7 @@ class TranscriberGUI(QtWidgets.QMainWindow):
                 if status:
                     self.output_queue.put(("progress", f"Audio status: {status}\n"))
                 if self._recording_stop_event.is_set():
-                    raise sd.CallbackStop()
+                    return
                 with self._audio_buffer_lock:
                     samples = cast(list[float], indata[:, 0].astype(np.float32).tolist())
                     temp_buffer.extend(samples)
@@ -3244,6 +2838,9 @@ class TranscriberGUI(QtWidgets.QMainWindow):
                     if temp_buffer:
                         self._accumulated_audio_buffer.extend(temp_buffer)
                         temp_buffer.clear()
+                    captured_audio = list(self._accumulated_audio_buffer)
+                duration_seconds = int(len(captured_audio) / sample_rate) if sample_rate > 0 else 0
+                self.output_queue.put(("recording_captured", captured_audio, duration_seconds, sample_rate))
 
         except Exception as exc:
             self.output_queue.put(("error", f"Recording error: {exc}"))
@@ -3270,8 +2867,6 @@ class TranscriberGUI(QtWidgets.QMainWindow):
             elif kind == "progress":
                 self.append_progress(msg[1])
             elif kind == "transcript":
-                self.update_transcript(msg[1])
-            elif kind == "realtime_transcript":
                 self.update_transcript(msg[1])
             elif kind == "append_transcript":
                 new_text = msg[1]
@@ -3311,6 +2906,19 @@ class TranscriberGUI(QtWidgets.QMainWindow):
                     self.is_recording = False
                     self._set_record_button_state(recording=False)
                 self._reset_recording_ui_state()
+                self.record_button.setEnabled(True)
+                self._set_microphone_selection_enabled(True)
+            elif kind == "recording_captured":
+                audio_buffer = list(cast(list[float], msg[1]))
+                duration_seconds = int(msg[2]) if len(msg) > 2 else 0
+                sample_rate = int(msg[3]) if len(msg) > 3 else self.config.recording.sample_rate
+                self._reset_recording_ui_state()
+                self.update_status("Transcribing microphone recording...", self.theme.colors.warning)
+                self._start_recorded_audio_transcription(
+                    audio_buffer=audio_buffer,
+                    duration_seconds=duration_seconds,
+                    sample_rate=sample_rate,
+                )
             elif kind == "transcribe_finished":
                 success = bool(msg[1]) if len(msg) > 1 else False
                 self.transcribe_button.setEnabled(True)
@@ -3329,6 +2937,13 @@ class TranscriberGUI(QtWidgets.QMainWindow):
                     self._flash_card_success(self._transcript_card)
             elif kind == "recording_thread_done":
                 self.recording_thread = None
+            elif kind == "microphone_done":
+                success = bool(msg[1]) if len(msg) > 1 else False
+                self.transcribe_thread = None
+                self.record_button.setEnabled(True)
+                self._set_microphone_selection_enabled(True)
+                if success and hasattr(self, '_transcript_card'):
+                    self._flash_card_success(self._transcript_card)
             elif kind == "model_ready":
                 self._loading_model = False
                 self.record_button.setEnabled(True)
