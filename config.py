@@ -453,6 +453,8 @@ class AppConfig:
             def _coerce_bool(value: object, default: bool) -> bool:
                 if isinstance(value, bool):
                     return value
+                if isinstance(value, (int, float)) and value in {0, 1}:
+                    return bool(value)
                 if isinstance(value, str):
                     normalized = value.strip().lower()
                     if normalized in {"1", "true", "yes", "on"}:
@@ -706,11 +708,8 @@ class AppConfig:
         except json.JSONDecodeError as exc:
             logger.warning("Config file contains invalid JSON, using defaults: %s", exc)
             return cls()
-        except TypeError as exc:
+        except (TypeError, ValueError) as exc:
             logger.warning("Config file contains invalid value types, using defaults: %s", exc)
-            return cls()
-        except Exception as exc:
-            logger.warning("Failed to load config, using defaults: %s", exc)
             return cls()
 
 

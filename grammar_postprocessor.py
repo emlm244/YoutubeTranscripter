@@ -1061,7 +1061,7 @@ def post_process_grammar(
 
 def check_grammar_status(
     *,
-    lazy: bool = False,
+    lazy: bool = True,
     config: Optional[GrammarConfig] = None,
 ) -> Tuple[bool, str]:
     """Check if grammar post-processing is available.

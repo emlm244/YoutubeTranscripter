@@ -599,7 +599,7 @@ def test_post_process_and_status_helpers(monkeypatch):
     assert out_enhanced is False
 
     monkeypatch.setattr(gp.GrammarPostProcessor, "get_status", lambda self: "GECToR (cpu)")
-    available, status = gp.check_grammar_status()
+    available, status = gp.check_grammar_status(lazy=False)
     assert available is True
     assert status == "GECToR (cpu)"
 

@@ -58,11 +58,32 @@ def resolve_whisper_model_from_cache(model_name: str) -> Path:
     if repo_id is None:
         raise ValueError(f"Unknown Whisper model: {model_name}")
 
-    cached_config = try_to_load_from_cache(repo_id=repo_id, filename="config.json")
-    if not isinstance(cached_config, str):
-        raise FileNotFoundError(model_name)
+    def _resolve_file(filename: str) -> Path:
+        cached_file = try_to_load_from_cache(repo_id=repo_id, filename=filename)
+        if not isinstance(cached_file, str):
+            raise FileNotFoundError(f"{model_name}:{filename}")
+        path = Path(cached_file)
+        if not path.exists():
+            raise FileNotFoundError(f"{model_name}:{filename}")
+        return path
 
-    return Path(cached_config).parent
+    cached_paths = [
+        _resolve_file("config.json"),
+        _resolve_file("model.bin"),
+        _resolve_file("tokenizer.json"),
+        _resolve_file("preprocessor_config.json"),
+    ]
+    last_error: FileNotFoundError | None = None
+    for vocabulary_filename in ("vocabulary.json", "vocab.json", "vocab.txt"):
+        try:
+            cached_paths.append(_resolve_file(vocabulary_filename))
+            break
+        except FileNotFoundError as exc:
+            last_error = exc
+    else:
+        raise last_error or FileNotFoundError(f"{model_name}:vocabulary")
+
+    return _require_single_snapshot(cached_paths, repo_id=repo_id)
 
 
 def resolve_hf_file_from_cache(repo_id: str, filename: str) -> Path:

@@ -325,6 +325,35 @@ class TestAppConfig:
         assert cfg.grammar.enabled is True
         assert cfg.grammar.gector_batch_size == 4
 
+    def test_load_coerces_numeric_json_booleans(self):
+        data = {
+            "transcription": {
+                "vad_filter": 0,
+                "clean_filler_words": 1,
+            },
+            "grammar": {"enabled": 1.0},
+        }
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
+            json.dump(data, f)
+            f.flush()
+            cfg = AppConfig.load(Path(f.name))
+
+        assert cfg.transcription.vad_filter is False
+        assert cfg.transcription.clean_filler_words is True
+        assert cfg.grammar.enabled is True
+
+    def test_load_reraises_config_read_errors(self, monkeypatch, tmp_path: Path):
+        path = tmp_path / "config.json"
+        path.write_text("{}", encoding="utf-8")
+
+        def _raise_permission(*args, **kwargs):
+            raise PermissionError("locked")
+
+        monkeypatch.setattr("builtins.open", _raise_permission)
+
+        with pytest.raises(PermissionError, match="locked"):
+            AppConfig.load(path)
+
     def test_load_non_mapping_json_returns_defaults(self):
         with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
             json.dump(["not", "a", "mapping"], f)

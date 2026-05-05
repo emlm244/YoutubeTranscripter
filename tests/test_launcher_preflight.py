@@ -163,12 +163,22 @@ def test_bootstrap_runtime_environment_delegates_to_runtime_bootstrap(monkeypatc
 def test_resolve_whisper_model_from_cache_uses_bootstrap_and_cache_lookup(monkeypatch, tmp_path: Path):
     bootstrap_calls = {"count": 0}
     snapshot_dir = tmp_path / "hub" / "models--example--whisper" / "snapshots" / "abc123"
-    config_path = snapshot_dir / "config.json"
-    config_path.parent.mkdir(parents=True, exist_ok=True)
-    config_path.write_text("{}", encoding="utf-8")
+    cached_files = {
+        "config.json": snapshot_dir / "config.json",
+        "model.bin": snapshot_dir / "model.bin",
+        "tokenizer.json": snapshot_dir / "tokenizer.json",
+        "preprocessor_config.json": snapshot_dir / "preprocessor_config.json",
+        "vocabulary.json": snapshot_dir / "vocabulary.json",
+    }
+    for path in cached_files.values():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("cached", encoding="utf-8")
 
     def _bootstrap_runtime():
         bootstrap_calls["count"] += 1
+
+    def _try_to_load_from_cache(repo_id: str, filename: str):
+        return str(cached_files[filename])
 
     monkeypatch.setattr(
         launcher_preflight,
@@ -183,13 +193,47 @@ def test_resolve_whisper_model_from_cache_uses_bootstrap_and_cache_lookup(monkey
     monkeypatch.setitem(
         sys.modules,
         "huggingface_hub",
-        SimpleNamespace(try_to_load_from_cache=lambda repo_id, filename: str(config_path)),
+        SimpleNamespace(try_to_load_from_cache=_try_to_load_from_cache),
     )
 
     resolved = launcher_preflight.resolve_whisper_model_from_cache("large-v3")
 
     assert bootstrap_calls["count"] == 1
     assert resolved == snapshot_dir.resolve()
+
+
+def test_resolve_whisper_model_from_cache_rejects_partial_cache(monkeypatch, tmp_path: Path):
+    snapshot_dir = tmp_path / "hub" / "models--example--whisper" / "snapshots" / "abc123"
+    cached_files = {
+        "config.json": snapshot_dir / "config.json",
+        "model.bin": snapshot_dir / "model.bin",
+        "tokenizer.json": snapshot_dir / "tokenizer.json",
+        "preprocessor_config.json": snapshot_dir / "preprocessor_config.json",
+    }
+    for path in cached_files.values():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("cached", encoding="utf-8")
+
+    monkeypatch.setattr(launcher_preflight, "_bootstrap_runtime_environment", lambda: None)
+    monkeypatch.setattr(
+        launcher_preflight,
+        "FASTER_WHISPER_MODEL_REPOS",
+        {"large-v3": "example/whisper"},
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "huggingface_hub",
+        SimpleNamespace(
+            try_to_load_from_cache=(
+                lambda repo_id, filename: str(cached_files[filename])
+                if filename in cached_files
+                else None
+            )
+        ),
+    )
+
+    with pytest.raises(FileNotFoundError, match="vocab"):
+        launcher_preflight.resolve_whisper_model_from_cache("large-v3")
 
 
 def test_resolve_hf_file_from_cache_uses_bootstrap_and_requires_cached_file(monkeypatch, tmp_path: Path):
