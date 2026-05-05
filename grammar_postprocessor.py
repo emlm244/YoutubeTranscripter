@@ -167,7 +167,8 @@ def _resolve_cached_transformer_repo_dir(repo_id: str) -> Path | None:
     if not repo_id:
         return None
 
-    if _resolve_cached_tokenizer_dir(repo_id) is None:
+    tokenizer_dir = _resolve_cached_tokenizer_dir(repo_id)
+    if tokenizer_dir is None:
         return None
 
     for weight_filename in ("model.safetensors", "pytorch_model.bin"):
@@ -175,7 +176,7 @@ def _resolve_cached_transformer_repo_dir(repo_id: str) -> Path | None:
             repo_id,
             required_files=("config.json", weight_filename),
         )
-        if cached_dir is not None:
+        if cached_dir is not None and cached_dir == tokenizer_dir:
             return cached_dir
 
     return None
@@ -186,13 +187,17 @@ def _resolve_cached_gector_repo_dir(model_id: str) -> Path | None:
     if not model_id:
         return None
 
-    if _resolve_cached_tokenizer_dir(model_id) is None:
+    tokenizer_dir = _resolve_cached_tokenizer_dir(model_id)
+    if tokenizer_dir is None:
         return None
 
-    return _resolve_cached_hf_repo_dir(
+    cached_dir = _resolve_cached_hf_repo_dir(
         model_id,
         required_files=("config.json", "pytorch_model.bin"),
     )
+    if cached_dir != tokenizer_dir:
+        return None
+    return cached_dir
 
 
 def _resolve_pretrained_source(repo_id: str, *, cache_resolver: Any) -> tuple[str, bool]:
@@ -224,7 +229,9 @@ def _load_transformers_tokenizer(auto_tokenizer: Any, source: str, *, local_file
     """Load a tokenizer while remaining compatible with older/mocked signatures."""
     try:
         return auto_tokenizer.from_pretrained(source, local_files_only=local_files_only)
-    except TypeError:
+    except TypeError as exc:
+        if "local_files_only" not in str(exc):
+            raise
         return auto_tokenizer.from_pretrained(source)
 
 
@@ -238,7 +245,9 @@ def _load_transformers_model(
     """Load a transformer model while remaining compatible with older/mocked signatures."""
     try:
         return auto_model.from_pretrained(source, local_files_only=local_files_only, **kwargs)
-    except TypeError:
+    except TypeError as exc:
+        if "local_files_only" not in str(exc):
+            raise
         return auto_model.from_pretrained(source, **kwargs)
 
 

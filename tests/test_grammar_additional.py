@@ -221,6 +221,68 @@ def test_unload_handles_cleanup_exception(monkeypatch):
     assert manager.is_available() is True
 
 
+def test_resolve_cached_transformer_repo_requires_tokenizer_same_snapshot(monkeypatch, tmp_path):
+    model_snapshot = tmp_path / "snapshots" / "model"
+    tokenizer_snapshot = tmp_path / "snapshots" / "tokenizer"
+    model_snapshot.mkdir(parents=True)
+    tokenizer_snapshot.mkdir(parents=True)
+    paths = {
+        "config.json": model_snapshot / "config.json",
+        "model.safetensors": model_snapshot / "model.safetensors",
+        "tokenizer.json": tokenizer_snapshot / "tokenizer.json",
+        "tokenizer_config.json": tokenizer_snapshot / "tokenizer_config.json",
+    }
+    for path in paths.values():
+        path.write_text("{}", encoding="utf-8")
+
+    monkeypatch.setattr(gp, "_resolve_cached_hf_file", lambda _repo_id, filename: paths.get(filename))
+
+    assert gp._resolve_cached_transformer_repo_dir("example/backbone") is None
+
+
+def test_resolve_cached_gector_repo_requires_tokenizer_same_snapshot(monkeypatch, tmp_path):
+    model_snapshot = tmp_path / "snapshots" / "model"
+    tokenizer_snapshot = tmp_path / "snapshots" / "tokenizer"
+    model_snapshot.mkdir(parents=True)
+    tokenizer_snapshot.mkdir(parents=True)
+    paths = {
+        "config.json": model_snapshot / "config.json",
+        "pytorch_model.bin": model_snapshot / "pytorch_model.bin",
+        "tokenizer.json": tokenizer_snapshot / "tokenizer.json",
+        "tokenizer_config.json": tokenizer_snapshot / "tokenizer_config.json",
+    }
+    for path in paths.values():
+        path.write_text("{}", encoding="utf-8")
+
+    monkeypatch.setattr(gp, "_resolve_cached_hf_file", lambda _repo_id, filename: paths.get(filename))
+
+    assert gp._resolve_cached_gector_repo_dir("example/gector") is None
+
+
+def test_load_transformers_helpers_only_fallback_for_local_files_only_typeerror():
+    class _FallbackLoader:
+        def __init__(self) -> None:
+            self.calls: list[dict[str, object]] = []
+
+        def from_pretrained(self, source: str, **kwargs):
+            self.calls.append(kwargs)
+            if "local_files_only" in kwargs:
+                raise TypeError("got an unexpected keyword argument 'local_files_only'")
+            return f"loaded:{source}"
+
+    class _BrokenLoader:
+        def from_pretrained(self, source: str, **kwargs):
+            raise TypeError("genuine model construction error")
+
+    fallback_loader = _FallbackLoader()
+
+    assert gp._load_transformers_tokenizer(fallback_loader, "cached", local_files_only=True) == "loaded:cached"
+    assert fallback_loader.calls == [{"local_files_only": True}, {}]
+
+    with pytest.raises(TypeError, match="genuine model construction error"):
+        gp._load_transformers_model(_BrokenLoader(), "cached", local_files_only=True)
+
+
 def test_correct_returns_input_when_uninitialized():
     manager = gp._GECToRManager()
     sentences = ["a", "b"]
@@ -518,6 +580,7 @@ def test_ensure_backend_and_status_paths(monkeypatch):
     assert processor2._active_backend == "languagetool"
     assert processor2.get_status() == "LanguageTool"
 
+
 def test_post_process_and_status_helpers(monkeypatch):
     monkeypatch.setattr(gp.GrammarPostProcessor, "process_text", lambda self, text: (f"{text} ok", True))
     monkeypatch.setattr(gp.GrammarPostProcessor, "process_segments", lambda self, segs: (segs, False))
@@ -652,9 +715,7 @@ def test_load_gector_model_with_mocks(tmp_path, monkeypatch):
         sys.modules,
         "huggingface_hub",
         types.SimpleNamespace(
-            hf_hub_download=lambda repo_id, filename, local_files_only=False: str(
-                config_path if filename == "config.json" else model_path
-            )
+            hf_hub_download=lambda repo_id, filename, local_files_only=False: str(config_path if filename == "config.json" else model_path)
         ),
     )
 
@@ -768,9 +829,7 @@ def test_load_gector_model_prefers_cached_local_dirs(tmp_path, monkeypatch):
     monkeypatch.setitem(
         sys.modules,
         "huggingface_hub",
-        types.SimpleNamespace(
-            hf_hub_download=lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("hub download not expected"))
-        ),
+        types.SimpleNamespace(hf_hub_download=lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("hub download not expected"))),
     )
     monkeypatch.setattr(gp, "_resolve_cached_gector_repo_dir", lambda _model_id: gector_dir)
     monkeypatch.setattr(gp, "_resolve_cached_transformer_repo_dir", lambda _repo_id: backbone_dir)

@@ -117,6 +117,32 @@ def test_inspect_gector_model_accepts_safetensors_only_cache(monkeypatch, tmp_pa
     assert str(tmp_path) in item.detail
 
 
+def test_resolve_transformer_model_from_cache_rejects_mixed_snapshots(monkeypatch, tmp_path: Path):
+    model_snapshot = tmp_path / "model"
+    tokenizer_snapshot = tmp_path / "tokenizer"
+    model_snapshot.mkdir()
+    tokenizer_snapshot.mkdir()
+    paths = {
+        "config.json": model_snapshot / "config.json",
+        "model.safetensors": model_snapshot / "model.safetensors",
+        "tokenizer_config.json": tokenizer_snapshot / "tokenizer_config.json",
+        "tokenizer.json": tokenizer_snapshot / "tokenizer.json",
+    }
+    for path in paths.values():
+        path.write_text("{}", encoding="utf-8")
+
+    def _resolve(repo_id: str, filename: str) -> Path:
+        try:
+            return paths[filename]
+        except KeyError as exc:
+            raise FileNotFoundError(filename) from exc
+
+    monkeypatch.setattr(launcher_preflight, "resolve_hf_file_from_cache", _resolve)
+
+    with pytest.raises(FileNotFoundError, match="multiple snapshots"):
+        launcher_preflight._resolve_transformer_model_from_cache("example/backbone")
+
+
 def test_bootstrap_runtime_environment_delegates_to_runtime_bootstrap(monkeypatch):
     calls = {"count": 0}
 
@@ -244,6 +270,36 @@ def test_inspect_gector_model_reports_partial_cache_as_info(monkeypatch, tmp_pat
 
     assert item.status == "info"
     assert "Some cached files are missing" in item.detail
+
+
+def test_inspect_gector_model_reports_mixed_snapshot_cache_as_info(monkeypatch, tmp_path: Path):
+    model_snapshot = tmp_path / "model"
+    tokenizer_snapshot = tmp_path / "tokenizer"
+    model_snapshot.mkdir()
+    tokenizer_snapshot.mkdir()
+    paths = {
+        "config.json": model_snapshot / "config.json",
+        "pytorch_model.bin": model_snapshot / "pytorch_model.bin",
+        "tokenizer_config.json": tokenizer_snapshot / "tokenizer_config.json",
+        "tokenizer.json": tokenizer_snapshot / "tokenizer.json",
+    }
+    paths["config.json"].write_text("{}", encoding="utf-8")
+    for filename, path in paths.items():
+        if filename != "config.json":
+            path.write_text("{}", encoding="utf-8")
+
+    def _resolve(repo_id: str, filename: str) -> Path:
+        try:
+            return paths[filename]
+        except KeyError as exc:
+            raise FileNotFoundError(filename) from exc
+
+    monkeypatch.setattr(launcher_preflight, "resolve_hf_file_from_cache", _resolve)
+
+    item = launcher_preflight.inspect_gector_model("example/gector")
+
+    assert item.status == "info"
+    assert "Not cached yet" in item.detail
 
 
 def test_inspect_gector_model_reports_missing_backbone_as_info(monkeypatch, tmp_path: Path):

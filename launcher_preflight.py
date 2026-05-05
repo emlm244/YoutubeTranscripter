@@ -87,20 +87,30 @@ def _resolve_any_hf_file_from_cache(repo_id: str, filenames: tuple[str, ...]) ->
     raise last_error or FileNotFoundError(f"{repo_id}:{'|'.join(filenames)}")
 
 
+def _require_single_snapshot(paths: list[Path], *, repo_id: str) -> Path:
+    snapshot_dirs = {path.parent for path in paths}
+    if len(snapshot_dirs) != 1:
+        raise FileNotFoundError(f"{repo_id}: cached files span multiple snapshots")
+    return paths[0].parent
+
+
 def _resolve_transformer_model_from_cache(repo_id: str) -> Path:
     """Resolve a transformer repo cache including config, weights, and tokenizer."""
     config_path = resolve_hf_file_from_cache(repo_id, "config.json")
-    resolve_hf_file_from_cache(repo_id, "tokenizer_config.json")
+    cached_paths = [
+        config_path,
+        resolve_hf_file_from_cache(repo_id, "tokenizer_config.json"),
+    ]
 
     try:
-        resolve_hf_file_from_cache(repo_id, "tokenizer.json")
+        cached_paths.append(resolve_hf_file_from_cache(repo_id, "tokenizer.json"))
     except FileNotFoundError:
-        resolve_hf_file_from_cache(repo_id, "vocab.json")
-        resolve_hf_file_from_cache(repo_id, "merges.txt")
+        cached_paths.append(resolve_hf_file_from_cache(repo_id, "vocab.json"))
+        cached_paths.append(resolve_hf_file_from_cache(repo_id, "merges.txt"))
 
-    _resolve_any_hf_file_from_cache(repo_id, ("model.safetensors", "pytorch_model.bin"))
+    cached_paths.append(_resolve_any_hf_file_from_cache(repo_id, ("model.safetensors", "pytorch_model.bin")))
 
-    return config_path.parent
+    return _require_single_snapshot(cached_paths, repo_id=repo_id)
 
 
 def inspect_whisper_model(model_name: str) -> PreflightItem:
@@ -140,6 +150,7 @@ def inspect_gector_model(model_id: str) -> PreflightItem:
         except FileNotFoundError:
             cached_paths.append(resolve_hf_file_from_cache(model_id, "vocab.json"))
             cached_paths.append(resolve_hf_file_from_cache(model_id, "merges.txt"))
+        cached_dir = _require_single_snapshot(cached_paths, repo_id=model_id)
     except Exception:
         return PreflightItem(
             label,
@@ -176,10 +187,10 @@ def inspect_gector_model(model_id: str) -> PreflightItem:
         return PreflightItem(
             label,
             "ok",
-            f"Cached in {cached_paths[0].parent} with backbone cached at {backbone_dir}",
+            f"Cached in {cached_dir} with backbone cached at {backbone_dir}",
         )
 
-    return PreflightItem(label, "ok", f"Cached in {cached_paths[0].parent}")
+    return PreflightItem(label, "ok", f"Cached in {cached_dir}")
 
 
 def inspect_verb_dictionary() -> PreflightItem:

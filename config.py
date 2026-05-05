@@ -496,6 +496,7 @@ class AppConfig:
                 legacy_prompt_migration = _is_legacy_initial_prompt(saved_initial_prompt)
                 config.transcription = TranscriptionConfig(
                     batch_backend=normalize_batch_backend(
+                        # Keep existing configs on local Whisper unless they opt into OpenAI.
                         t.get("batch_backend", "local_whisper"),
                         default="local_whisper",
                     ),
