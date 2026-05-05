@@ -357,9 +357,7 @@ class TestTranscribeHelpers:
         assert compute_type == "int8"
         assert calls == [("cuda", "float16"), ("cpu", "int8")]
 
-    def test_transcribe_local_file_uses_ranked_audio_stream_when_available(
-        self, monkeypatch, tmp_path
-    ):
+    def test_transcribe_local_file_uses_ranked_audio_stream_when_available(self, monkeypatch, tmp_path):
         from config import TranscriptionConfig
         from transcript_types import make_transcript_segment
         from youtube_transcriber import (
@@ -450,9 +448,7 @@ class TestTranscribeHelpers:
         assert extracted_indices == [1]
         assert rank_call_count["count"] == 1
 
-    def test_transcribe_local_file_tries_alternate_ranked_stream_after_initial_video_retries(
-        self, monkeypatch, tmp_path
-    ):
+    def test_transcribe_local_file_tries_alternate_ranked_stream_after_initial_video_retries(self, monkeypatch, tmp_path):
         from config import TranscriptionConfig
         from transcript_types import make_transcript_segment
         from youtube_transcriber import (
@@ -475,9 +471,7 @@ class TestTranscribeHelpers:
             device="cpu",
             compute_type="int8",
         )
-        recovered_segments = [
-            make_transcript_segment(start=0.0, end=1.0, text="alternate track speech")
-        ]
+        recovered_segments = [make_transcript_segment(start=0.0, end=1.0, text="alternate track speech")]
 
         monkeypatch.setattr("youtube_transcriber.get_torch", lambda context: None)
         monkeypatch.setattr("youtube_transcriber._log_transcription_runtime_config", lambda config, context: None)
@@ -494,7 +488,7 @@ class TestTranscribeHelpers:
             "youtube_transcriber._extract_audio_to_wav",
             lambda _file_path, output_path, _ffmpeg, *, audio_index=None, **kwargs: (
                 extracted_indices.append(audio_index),
-                open(output_path, "wb").write(b"wav"),
+                Path(output_path).write_bytes(b"wav"),
             ),
         )
         monkeypatch.setattr(
@@ -578,12 +572,14 @@ class TestTranscribeHelpers:
             pipeline=object(),
             device="cpu",
             compute_type="int8",
+            ffmpeg_location="ffmpeg",
         )
         observed_states: list[_WhisperExecutionState] = []
         segments = [make_transcript_segment(start=0.0, end=1.0, text="reused whisper transcript")]
 
         monkeypatch.setattr("youtube_transcriber.get_torch", lambda context: None)
         monkeypatch.setattr("youtube_transcriber._log_transcription_runtime_config", lambda config, context: None)
+        monkeypatch.setattr("youtube_transcriber._setup_device_and_compute_type", lambda config, verbose=False: ("cpu", "int8"))
         monkeypatch.setattr(
             "youtube_transcriber._initialize_whisper_execution",
             lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("should reuse the preloaded Whisper runtime")),
@@ -613,7 +609,7 @@ class TestTranscribeHelpers:
         transcript, returned_segments = transcribe_local_file(
             str(audio_file),
             ffmpeg_location="ffmpeg",
-            config=TranscriptionConfig(),
+            config=TranscriptionConfig(device_preference="cpu", compute_type="int8"),
             execution_state=reused_state,
             execution_state_observer=observed_states.append,
         )
@@ -741,9 +737,7 @@ class TestTranscribeHelpers:
             kwargs=kwargs,
             cpu_recovery_overrides={"beam_size": 1, "batch_size": 8},
             before_retry=lambda: retry_markers.append("retried"),
-            segment_observer=lambda segment, info_obj: observed_text.append(
-                f"{segment.text}:{info_obj.language}"
-            ),
+            segment_observer=lambda segment, info_obj: observed_text.append(f"{segment.text}:{info_obj.language}"),
         )
 
         assert segments_data == [
@@ -869,9 +863,7 @@ class TestTranscribeHelpers:
             kwargs=kwargs,
             cpu_recovery_overrides={"beam_size": 1, "batch_size": 8},
             before_retry=lambda: retry_markers.append("retried"),
-            segment_observer=lambda segment, info_obj: observed_text.append(
-                f"{segment.text}:{info_obj.language}"
-            ),
+            segment_observer=lambda segment, info_obj: observed_text.append(f"{segment.text}:{info_obj.language}"),
         )
 
         assert segments_data == [

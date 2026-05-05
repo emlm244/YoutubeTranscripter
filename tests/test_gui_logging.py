@@ -223,10 +223,7 @@ def test_setup_backend_logging_for_gui_reuses_one_file_handler(monkeypatch, tmp_
         def emit(self, record: logging.LogRecord) -> None:
             return None
 
-    original_logger_state = {
-        name: (logging.getLogger(name).handlers[:], logging.getLogger(name).level)
-        for name in logger_names
-    }
+    original_logger_state = {name: (logging.getLogger(name).handlers[:], logging.getLogger(name).level) for name in logger_names}
 
     monkeypatch.setattr(gt, "BACKEND_LOGGER_LEVELS", logger_levels)
     monkeypatch.setattr(gt, "_backend_file_handler", None)
@@ -330,6 +327,7 @@ def test_build_transcription_complete_status_variants() -> None:
 def test_update_grammar_status_uses_current_checkbox_config(monkeypatch) -> None:
     text_updates: list[str] = []
     style_updates: list[str] = []
+    grammar_check_kwargs: dict[str, object] = {}
 
     fake_gui = cast(
         Any,
@@ -343,12 +341,18 @@ def test_update_grammar_status_uses_current_checkbox_config(monkeypatch) -> None
             _build_grammar_config=lambda: GrammarConfig(enabled=True, backend="gector"),
         ),
     )
-    monkeypatch.setattr(gt, "check_grammar_status", lambda **kwargs: (True, "GECToR (ready on demand)"))
+
+    def _capture_check_grammar_status(**kwargs):
+        grammar_check_kwargs.update(kwargs)
+        return (True, "GECToR (ready on demand)")
+
+    monkeypatch.setattr(gt, "check_grammar_status", _capture_check_grammar_status)
 
     TranscriberGUI._update_grammar_status(fake_gui)
 
     assert text_updates[-1] == "(GECToR (ready on demand))"
     assert style_updates
+    assert grammar_check_kwargs.get("lazy") is True
 
 
 def test_build_transcription_config_keeps_audio_cleanup_toggles_independent(monkeypatch) -> None:
@@ -430,7 +434,7 @@ def test_save_settings_persists_runtime_and_ui_config(monkeypatch) -> None:
 
     TranscriberGUI._save_settings(fake_gui)
 
-    assert saved_values["splitter/state"] == b"splitter-state"
+    assert saved_values == {"splitter/state": b"splitter-state"}
     assert fake_gui.config.ui.last_youtube_url.endswith("dQw4w9WgXcQ")
     assert fake_gui.config.ui.output_format == "timestamped"
     assert fake_gui.config.ui.transcription_preset == "balanced"
@@ -553,9 +557,7 @@ def test_start_recording_waits_for_existing_transcription() -> None:
 
     TranscriberGUI.start_recording(fake_gui)
 
-    assert progress_messages == [
-        "Wait for the current transcription to finish before starting a new recording.\n"
-    ]
+    assert progress_messages == ["Wait for the current transcription to finish before starting a new recording.\n"]
     assert status_calls == [("Transcription already in progress", "#f90")]
 
 
@@ -667,6 +669,7 @@ def test_microphone_compare_mode_replaces_transcript_and_clears_segments(monkeyp
 
 def test_record_audio_thread_emits_captured_audio(monkeypatch) -> None:
     """The microphone thread should capture samples and queue them for post-stop transcription."""
+
     class _FakeCallbackStop(Exception):
         pass
 
@@ -685,9 +688,11 @@ def test_record_audio_thread_emits_captured_audio(monkeypatch) -> None:
     fake_sounddevice = SimpleNamespace(
         CallbackStop=_FakeCallbackStop,
         PortAudioError=RuntimeError,
-        query_devices=lambda *args, **kwargs: [
-            {"name": "Mic", "max_input_channels": 1, "default_samplerate": 16000}
-        ] if not args else {"name": "Mic", "max_input_channels": 1, "default_samplerate": 16000},
+        query_devices=lambda *args, **kwargs: (
+            [{"name": "Mic", "max_input_channels": 1, "default_samplerate": 16000}]
+            if not args
+            else {"name": "Mic", "max_input_channels": 1, "default_samplerate": 16000}
+        ),
         InputStream=_FakeInputStream,
     )
     fake_gui = cast(
@@ -794,17 +799,12 @@ def test_load_whisper_model_frees_grammar_vram_before_cuda_load(monkeypatch) -> 
         ),
     )
 
-    progress_messages = [
-        cast(str, msg[1]) for msg in _drain_queue(fake_gui.output_queue) if msg[0] == "progress"
-    ]
+    progress_messages = [cast(str, msg[1]) for msg in _drain_queue(fake_gui.output_queue) if msg[0] == "progress"]
 
     assert unload_calls == ["unload"]
     assert gc_calls == ["collect"]
     assert empty_cache_calls == ["empty"]
-    assert any(
-        "Freeing grammar-model GPU memory before loading Whisper" in message
-        for message in progress_messages
-    )
+    assert any("Freeing grammar-model GPU memory before loading Whisper" in message for message in progress_messages)
 
 
 def test_load_whisper_model_releases_existing_pipeline_before_replacement(monkeypatch) -> None:
@@ -859,9 +859,7 @@ def test_load_whisper_model_releases_existing_pipeline_before_replacement(monkey
         ),
     )
 
-    progress_messages = [
-        cast(str, msg[1]) for msg in _drain_queue(fake_gui.output_queue) if msg[0] == "progress"
-    ]
+    progress_messages = [cast(str, msg[1]) for msg in _drain_queue(fake_gui.output_queue) if msg[0] == "progress"]
 
     assert empty_cache_calls == ["empty"]
     assert fake_gui.whisper_model is not None
@@ -1051,10 +1049,7 @@ def test_youtube_thread_does_not_duplicate_snapshot_when_grammar_fails(monkeypat
 
     assert transcript_messages == [("transcript", "raw transcript")]
     assert segment_messages == [("segments", segments)]
-    assert any(
-        message[0] == "progress" and "Grammar correction skipped: boom" in cast(str, message[1])
-        for message in messages
-    )
+    assert any(message[0] == "progress" and "Grammar correction skipped: boom" in cast(str, message[1]) for message in messages)
 
 
 def test_youtube_thread_emits_only_final_snapshot_after_successful_grammar(monkeypatch) -> None:
@@ -1121,10 +1116,7 @@ def test_local_file_thread_does_not_duplicate_snapshot_when_grammar_fails(monkey
 
     assert transcript_messages == [("transcript", "raw transcript")]
     assert segment_messages == [("segments", segments)]
-    assert any(
-        message[0] == "progress" and "Grammar correction skipped: boom" in cast(str, message[1])
-        for message in messages
-    )
+    assert any(message[0] == "progress" and "Grammar correction skipped: boom" in cast(str, message[1]) for message in messages)
 
 
 def test_local_file_thread_emits_only_final_snapshot_after_successful_grammar(monkeypatch) -> None:
@@ -1231,8 +1223,8 @@ def test_local_file_compare_mode_clears_mismatched_timestamp_segments(monkeypatc
 def test_local_file_thread_retries_full_job_on_cpu_after_cuda_oom(monkeypatch) -> None:
     """Recoverable CUDA OOMs should trigger a whole-job CPU retry instead of a hard failure."""
     fake_gui = _build_fake_gui()
-    fake_gui._build_cpu_recovery_transcription_config = (
-        lambda config: TranscriberGUI._build_cpu_recovery_transcription_config(fake_gui, config)
+    fake_gui._build_cpu_recovery_transcription_config = lambda config: TranscriberGUI._build_cpu_recovery_transcription_config(
+        fake_gui, config
     )
     recovered_segments = [make_transcript_segment(start=0.0, end=1.0, text="recovered transcript")]
     seen_configs: list[tuple[str, str, int]] = []
@@ -1272,10 +1264,7 @@ def test_local_file_thread_retries_full_job_on_cpu_after_cuda_oom(monkeypatch) -
     assert ("segments", recovered_segments) in messages
     assert ("transcribe_finished", True) in messages
     assert ("local_file_done", True) in messages
-    assert any(
-        message[0] == "progress" and "retrying full job on CPU" in cast(str, message[1])
-        for message in messages
-    )
+    assert any(message[0] == "progress" and "retrying full job on CPU" in cast(str, message[1]) for message in messages)
     assert not any(message[0] == "error" for message in messages)
 
 
@@ -1301,9 +1290,7 @@ def test_local_file_thread_reuses_loaded_whisper_runtime(monkeypatch) -> None:
     def _transcribe_local_file(**kwargs):
         execution_state = kwargs["execution_state"]
         assert execution_state is not None
-        seen_execution_states.append(
-            (execution_state.model_name, execution_state.device, execution_state.compute_type)
-        )
+        seen_execution_states.append((execution_state.model_name, execution_state.device, execution_state.compute_type))
         observer = kwargs.get("execution_state_observer")
         if observer is not None:
             observer(execution_state)
@@ -1321,7 +1308,4 @@ def test_local_file_thread_reuses_loaded_whisper_runtime(monkeypatch) -> None:
     messages = _drain_queue(fake_gui.output_queue)
     assert seen_execution_states == [("large-v3", "cuda", "float16")]
     assert ("transcript", "reused transcript") in messages
-    assert any(
-        message[0] == "progress" and "Reusing the loaded Whisper runtime" in cast(str, message[1])
-        for message in messages
-    )
+    assert any(message[0] == "progress" and "Reusing the loaded Whisper runtime" in cast(str, message[1]) for message in messages)

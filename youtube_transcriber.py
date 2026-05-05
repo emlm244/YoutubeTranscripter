@@ -54,7 +54,9 @@ warnings.filterwarnings("ignore", message=".*CUDA capability sm_120.*", category
 # Configure logging
 logger = logging.getLogger(__name__)
 
-MEDIA_CMD_TIMEOUT = 30 * 60
+MEDIA_PROBE_TIMEOUT = 60
+MEDIA_TRANSCODE_TIMEOUT = 30 * 60
+MEDIA_CMD_TIMEOUT = MEDIA_TRANSCODE_TIMEOUT
 
 
 def _ctranslate2_cuda_supported(*, verbose: bool = False) -> bool:
@@ -225,11 +227,8 @@ def setup_logging(verbose: bool = False, log_file: str = "youtube_transcriber.lo
     log_level = logging.DEBUG if verbose else logging.INFO
 
     # Create formatters
-    detailed_formatter = logging.Formatter(
-        '%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-        datefmt='%Y-%m-%d %H:%M:%S'
-    )
-    simple_formatter = logging.Formatter('%(message)s')
+    detailed_formatter = logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
+    simple_formatter = logging.Formatter("%(message)s")
 
     # Console handler (simple format for user-facing output)
     console_handler = logging.StreamHandler(sys.stdout)
@@ -241,12 +240,7 @@ def setup_logging(verbose: bool = False, log_file: str = "youtube_transcriber.lo
     if not log_path.is_absolute():
         log_path = get_log_path(log_file)
 
-    file_handler = RotatingFileHandler(
-        log_path,
-        maxBytes=LOG_FILE_MAX_BYTES,
-        backupCount=5,
-        encoding='utf-8'
-    )
+    file_handler = RotatingFileHandler(log_path, maxBytes=LOG_FILE_MAX_BYTES, backupCount=5, encoding="utf-8")
     file_handler.setLevel(logging.DEBUG)  # Always log everything to file
     file_handler.setFormatter(detailed_formatter)
 
@@ -257,8 +251,8 @@ def setup_logging(verbose: bool = False, log_file: str = "youtube_transcriber.lo
     root_logger.addHandler(file_handler)
 
     # Suppress verbose output from third-party libraries
-    logging.getLogger('yt_dlp').setLevel(logging.WARNING)
-    logging.getLogger('faster_whisper').setLevel(logging.INFO)
+    logging.getLogger("yt_dlp").setLevel(logging.WARNING)
+    logging.getLogger("faster_whisper").setLevel(logging.INFO)
 
 
 # Named constants (previously magic numbers)
@@ -650,11 +644,7 @@ def validate_youtube_url(url: str) -> tuple[bool, str | None]:
         "youtube-nocookie.com",
         "youtu.be",
     }
-    if not (
-        host in allowed_hosts
-        or host.endswith(".youtube.com")
-        or host.endswith(".youtube-nocookie.com")
-    ):
+    if not (host in allowed_hosts or host.endswith(".youtube.com") or host.endswith(".youtube-nocookie.com")):
         return False, f"Invalid domain: {parsed.netloc}. Expected a YouTube URL."
 
     if extract_video_id(url) is None:
@@ -699,6 +689,7 @@ def check_dependencies(*, include_gpu_probe: bool = True) -> tuple[bool, list[st
     # Check yt-dlp
     try:
         import yt_dlp as _test_yt_dlp  # noqa: F401
+
         logger.debug("yt-dlp is installed")
     except ImportError:
         missing.append("yt-dlp (required for YouTube downloads)")
@@ -706,6 +697,7 @@ def check_dependencies(*, include_gpu_probe: bool = True) -> tuple[bool, list[st
     # Check faster-whisper
     try:
         from faster_whisper import WhisperModel as _test_whisper  # noqa: F401
+
         logger.debug("faster-whisper is installed")
     except ImportError:
         missing.append("faster-whisper (required for transcription)")
@@ -720,6 +712,7 @@ def check_dependencies(*, include_gpu_probe: bool = True) -> tuple[bool, list[st
     # Check sounddevice
     try:
         import sounddevice as _test_sd  # noqa: F401
+
         logger.debug("sounddevice is installed")
     except ImportError:
         missing.append("sounddevice (required for microphone recording)")
@@ -755,21 +748,14 @@ def find_ffmpeg() -> Optional[str]:
 
     # Common installation paths
     common_paths = [str(path) for path in get_ffmpeg_search_roots()] + [
-        os.path.join(
-            os.environ.get("LOCALAPPDATA", ""), "Microsoft", "WinGet", "Packages"
-        ),
+        os.path.join(os.environ.get("LOCALAPPDATA", ""), "Microsoft", "WinGet", "Packages"),
         os.path.join(os.environ.get("ProgramFiles", "C:\\Program Files"), "FFmpeg"),
-        os.path.join(
-            os.environ.get("ProgramFiles(x86)", "C:\\Program Files (x86)"), "FFmpeg"
-        ),
+        os.path.join(os.environ.get("ProgramFiles(x86)", "C:\\Program Files (x86)"), "FFmpeg"),
         "C:\\ffmpeg",
     ]
 
     def _directory_has_ffmpeg_tools(directory: str) -> bool:
-        return all(
-            os.path.exists(os.path.join(directory, executable))
-            for executable in ("ffmpeg.exe", "ffprobe.exe")
-        )
+        return all(os.path.exists(os.path.join(directory, executable)) for executable in ("ffmpeg.exe", "ffprobe.exe"))
 
     # Search for ffmpeg.exe and ffprobe.exe in common paths
     for base_path in common_paths:
@@ -857,7 +843,7 @@ class AudioStreamCandidate:
         if self.info.sample_rate_hz:
             parts.append(f"{self.info.sample_rate_hz}Hz")
         if self.info.bit_rate_bps:
-            parts.append(f"{self.info.bit_rate_bps//1000}kbps")
+            parts.append(f"{self.info.bit_rate_bps // 1000}kbps")
         if self.info.language:
             parts.append(self.info.language)
         if self.info.title:
@@ -865,9 +851,7 @@ class AudioStreamCandidate:
         parts.append(f"rms={self.rms:.4f}")
         parts.append(f"peak={self.peak:.4f}")
         if self.probes:
-            probe_str = ", ".join(
-                f"{offset:.0f}s:{rms:.4f}/{peak:.4f}" for offset, rms, peak in self.probes
-            )
+            probe_str = ", ".join(f"{offset:.0f}s:{rms:.4f}/{peak:.4f}" for offset, rms, peak in self.probes)
             parts.append(f"probes={probe_str}")
         return " | ".join(parts)
 
@@ -895,7 +879,7 @@ def _list_audio_streams(file_path: str, ffmpeg_location: Optional[str]) -> list[
         file_path,
     ]
     try:
-        completed = subprocess.run(cmd, check=True, capture_output=True, text=True, timeout=MEDIA_CMD_TIMEOUT)
+        completed = subprocess.run(cmd, check=True, capture_output=True, text=True, timeout=MEDIA_PROBE_TIMEOUT)
     except FileNotFoundError:
         logger.debug("ffprobe not found; skipping audio stream enumeration")
         return []
@@ -970,7 +954,7 @@ def _probe_audio_energy(
         ]
     )
     try:
-        completed = subprocess.run(cmd, check=True, capture_output=True, timeout=MEDIA_CMD_TIMEOUT)
+        completed = subprocess.run(cmd, check=True, capture_output=True, timeout=MEDIA_PROBE_TIMEOUT)
     except subprocess.TimeoutExpired as exc:
         _log_media_cmd_timeout(cmd, exc)
         return 0.0, 0.0
@@ -1002,9 +986,7 @@ def _probe_audio_energy(
     return rms, peak_norm
 
 
-def _rank_audio_streams_for_transcription(
-    file_path: str, ffmpeg_location: Optional[str]
-) -> list[AudioStreamCandidate]:
+def _rank_audio_streams_for_transcription(file_path: str, ffmpeg_location: Optional[str]) -> list[AudioStreamCandidate]:
     streams = _list_audio_streams(file_path, ffmpeg_location)
     if not streams:
         return []
@@ -1084,7 +1066,7 @@ def _extract_audio_to_wav(
         ]
     )
     try:
-        subprocess.run(cmd, check=True, capture_output=True, timeout=MEDIA_CMD_TIMEOUT)
+        subprocess.run(cmd, check=True, capture_output=True, timeout=MEDIA_TRANSCODE_TIMEOUT)
     except subprocess.TimeoutExpired as exc:
         _log_media_cmd_timeout(cmd, exc)
         raise
@@ -1124,7 +1106,7 @@ def _extract_audio_to_openai_mp3(
         ]
     )
     try:
-        subprocess.run(cmd, check=True, capture_output=True, timeout=MEDIA_CMD_TIMEOUT)
+        subprocess.run(cmd, check=True, capture_output=True, timeout=MEDIA_TRANSCODE_TIMEOUT)
     except subprocess.TimeoutExpired as exc:
         _log_media_cmd_timeout(cmd, exc)
         raise
@@ -1161,7 +1143,7 @@ def _ffprobe_duration_seconds(file_path: str, ffmpeg_location: Optional[str]) ->
         file_path,
     ]
     try:
-        completed = subprocess.run(cmd, check=True, capture_output=True, text=True, timeout=MEDIA_CMD_TIMEOUT)
+        completed = subprocess.run(cmd, check=True, capture_output=True, text=True, timeout=MEDIA_PROBE_TIMEOUT)
     except subprocess.TimeoutExpired as exc:
         _log_media_cmd_timeout(cmd, exc)
         return None
@@ -1186,7 +1168,7 @@ def is_openai_api_configured() -> bool:
 def _require_openai_api_key() -> str:
     api_key = os.environ.get("OPENAI_API_KEY", "").strip()
     if not api_key:
-        raise TranscriberError("OPENAI_API_KEY is not set. Rotate the exposed key and set a fresh key in the environment.")
+        raise TranscriberError("OPENAI_API_KEY is not set. Set a valid key in the environment (e.g. OPENAI_API_KEY=sk-...).")
     return api_key
 
 
@@ -1255,11 +1237,7 @@ def _prepare_openai_audio_chunks(
     duration = _probe_duration_seconds(file_path, ffmpeg_location)
     file_size = os.path.getsize(file_path)
 
-    if (
-        not force_extract
-        and file_ext in OPENAI_SUPPORTED_AUDIO_EXTENSIONS
-        and file_size <= OPENAI_AUDIO_SAFE_UPLOAD_LIMIT_BYTES
-    ):
+    if not force_extract and file_ext in OPENAI_SUPPORTED_AUDIO_EXTENSIONS and file_size <= OPENAI_AUDIO_SAFE_UPLOAD_LIMIT_BYTES:
         end = duration if duration is not None else 0.0
         return [_OpenAIAudioChunk(path=file_path, start=0.0, end=end)]
 
@@ -1305,9 +1283,7 @@ def _prepare_openai_audio_chunks(
                 continue
             if chunk_size > OPENAI_AUDIO_UPLOAD_LIMIT_BYTES:
                 os.unlink(chunk_path)
-                raise TranscriberError(
-                    "OpenAI transcription chunk exceeds the Audio API upload limit even at the minimum chunk size."
-                )
+                raise TranscriberError("OpenAI transcription chunk exceeds the Audio API upload limit even at the minimum chunk size.")
             temp_paths.append(chunk_path)
             chunks.append(
                 _OpenAIAudioChunk(
@@ -1520,9 +1496,9 @@ def format_transcript_with_timestamps(segments_data: TranscriptSegments) -> str:
     """
     formatted_lines = []
     for item in segments_data:
-        start = item.get('start', 0)
-        text = item.get('text', '')
-        speaker = item.get('speaker', None)
+        start = item.get("start", 0)
+        text = item.get("text", "")
+        speaker = item.get("speaker", None)
         timestamp = format_timestamp(start)
         if speaker:
             formatted_lines.append(f"[{timestamp}] {speaker}: {text.strip()}")
@@ -1558,10 +1534,10 @@ def format_transcript_as_srt(segments_data: TranscriptSegments) -> str:
     """
     srt_lines = []
     for idx, item in enumerate(segments_data, start=1):
-        start = item.get('start', 0)
-        end = item.get('end', 0)
-        text = item.get('text', '').strip()
-        speaker = item.get('speaker', None)
+        start = item.get("start", 0)
+        end = item.get("end", 0)
+        text = item.get("text", "").strip()
+        speaker = item.get("speaker", None)
 
         # Add speaker label to text if available
         if speaker:
@@ -1589,56 +1565,54 @@ def format_transcript_as_json(segments_data: TranscriptSegments) -> str:
     """
     json_data = []
     for item in segments_data:
-        segment = {
-            'start': item.get('start', 0),
-            'end': item.get('end', 0),
-            'text': item.get('text', '').strip()
-        }
-        if 'speaker' in item and item['speaker']:
-            segment['speaker'] = item['speaker']
+        segment = {"start": item.get("start", 0), "end": item.get("end", 0), "text": item.get("text", "").strip()}
+        if "speaker" in item and item["speaker"]:
+            segment["speaker"] = item["speaker"]
         json_data.append(segment)
 
     return json.dumps(json_data, indent=2, ensure_ascii=False)
 
 
 # Known Whisper hallucination phrases (appear when model encounters silence/noise/music)
-HALLUCINATION_PHRASES = frozenset({
-    # Russian (very common hallucination)
-    "продолжение следует",
-    "до свидания",
-    "спасибо за просмотр",
-    # English
-    "thank you for watching",
-    "thanks for watching",
-    "thank you for reading",
-    "thank you for listening",
-    "thanks for listening",
-    "subscribe to my channel",
-    "please subscribe",
-    "like and subscribe",
-    "don't forget to subscribe",
-    "see you next time",
-    "see you in the next video",
-    "bye bye",
-    # German
-    "vielen dank fürs zuschauen",
-    "bis zum nächsten mal",
-    # Spanish
-    "gracias por ver",
-    "hasta la próxima",
-    # French
-    "merci d'avoir regardé",
-    "à bientôt",
-    # Chinese
-    "谢谢观看",
-    "请订阅",
-    # Japanese
-    "ご視聴ありがとうございました",
-    # Korean
-    "시청해 주셔서 감사합니다",
-    # Portuguese
-    "obrigado por assistir",
-})
+HALLUCINATION_PHRASES = frozenset(
+    {
+        # Russian (very common hallucination)
+        "продолжение следует",
+        "до свидания",
+        "спасибо за просмотр",
+        # English
+        "thank you for watching",
+        "thanks for watching",
+        "thank you for reading",
+        "thank you for listening",
+        "thanks for listening",
+        "subscribe to my channel",
+        "please subscribe",
+        "like and subscribe",
+        "don't forget to subscribe",
+        "see you next time",
+        "see you in the next video",
+        "bye bye",
+        # German
+        "vielen dank fürs zuschauen",
+        "bis zum nächsten mal",
+        # Spanish
+        "gracias por ver",
+        "hasta la próxima",
+        # French
+        "merci d'avoir regardé",
+        "à bientôt",
+        # Chinese
+        "谢谢观看",
+        "请订阅",
+        # Japanese
+        "ご視聴ありがとうございました",
+        # Korean
+        "시청해 주셔서 감사합니다",
+        # Portuguese
+        "obrigado por assistir",
+    }
+)
 
 
 _PROMPT_LEAKAGE_PATTERNS = (
@@ -1825,27 +1799,27 @@ def clean_filler_words(text: str) -> str:
         return ""
 
     # Standalone filler sounds (whole word match, case-insensitive)
-    filler_sounds = r'\b(?:um+|uh+|er+|ah+|eh+|hm+|hmm+|mm+)\b'
-    text = re.sub(filler_sounds, '', text, flags=re.IGNORECASE)
+    filler_sounds = r"\b(?:um+|uh+|er+|ah+|eh+|hm+|hmm+|mm+)\b"
+    text = re.sub(filler_sounds, "", text, flags=re.IGNORECASE)
 
     # Filler phrases (only when followed by comma or at sentence boundaries)
     filler_phrases = [
-        r',?\s*\byou know\b\s*,?',
-        r',?\s*\bI mean\b\s*,?',
-        r',?\s*\bsort of\b\s*,?',
-        r',?\s*\bkind of\b\s*,?',
-        r'\bbasically\s*,\s*',
-        r'\bactually\s*,\s*',
-        r'\blike\s*,\s*',
+        r",?\s*\byou know\b\s*,?",
+        r",?\s*\bI mean\b\s*,?",
+        r",?\s*\bsort of\b\s*,?",
+        r",?\s*\bkind of\b\s*,?",
+        r"\bbasically\s*,\s*",
+        r"\bactually\s*,\s*",
+        r"\blike\s*,\s*",
     ]
     for pattern in filler_phrases:
-        text = re.sub(pattern, ' ', text, flags=re.IGNORECASE)
+        text = re.sub(pattern, " ", text, flags=re.IGNORECASE)
 
     # Collapse multiple spaces and strip
-    text = re.sub(r'\s{2,}', ' ', text).strip()
+    text = re.sub(r"\s{2,}", " ", text).strip()
     # Fix leftover comma-space issues
-    text = re.sub(r'\s*,\s*,', ',', text)
-    text = re.sub(r'^\s*,\s*', '', text)
+    text = re.sub(r"\s*,\s*,", ",", text)
+    text = re.sub(r"^\s*,\s*", "", text)
 
     return text
 
@@ -1899,17 +1873,13 @@ def deduplicate_segments(
 
         # Count consecutive repetitions
         repeat_count = 1
-        while (
-            i + repeat_count < len(segments)
-            and segments[i + repeat_count].strip() == current_segment
-        ):
+        while i + repeat_count < len(segments) and segments[i + repeat_count].strip() == current_segment:
             repeat_count += 1
 
         # If segment repeats excessively, keep only first occurrence
         if repeat_count >= repetition_threshold:
             logger.warning(
-                f"Detected repetitive segment (repeated {repeat_count}x): "
-                f"'{current_segment[:50]}...' - keeping only first occurrence"
+                f"Detected repetitive segment (repeated {repeat_count}x): '{current_segment[:50]}...' - keeping only first occurrence"
             )
             deduplicated.append(segments[i])
             kept_indices.append(i)
@@ -1942,7 +1912,7 @@ def _normalize_transcript_segments(
     hallucination_count = 0
     artifact_cleanup_count = 0
 
-    if normalized_segments:
+    if filter_hallucinated and normalized_segments:
         cleaned_segments: TranscriptSegments = []
         for segment in normalized_segments:
             text = segment.get("text", "")
@@ -1982,8 +1952,7 @@ def _normalize_transcript_segments(
 
     if clean_fillers and normalized_segments:
         normalized_segments = [
-            replace_segment_text(segment, clean_filler_words(segment.get("text", "")))
-            for segment in normalized_segments
+            replace_segment_text(segment, clean_filler_words(segment.get("text", ""))) for segment in normalized_segments
         ]
         logger.info("Filler words cleaned from transcript")
 
@@ -2052,9 +2021,7 @@ def get_youtube_transcript(video_id: str) -> tuple[str | None, TranscriptSegment
         return None, None
 
 
-def download_audio(
-    video_url: str, output_path: str = "audio", ffmpeg_location: Optional[str] = None
-) -> Optional[str]:
+def download_audio(video_url: str, output_path: str = "audio", ffmpeg_location: Optional[str] = None) -> Optional[str]:
     """Download audio from YouTube video with size limits and error handling.
 
     Args:
@@ -2084,9 +2051,7 @@ def download_audio(
         stat = shutil.disk_usage(".")
         free_gb = stat.free / (1024**3)
         if free_gb < MIN_FREE_DISK_GB:
-            raise AudioDownloadError(
-                f"Insufficient disk space: {free_gb:.2f}GB free (need at least {MIN_FREE_DISK_GB}GB)"
-            )
+            raise AudioDownloadError(f"Insufficient disk space: {free_gb:.2f}GB free (need at least {MIN_FREE_DISK_GB}GB)")
 
         # Try to find FFmpeg if not provided
         if not ffmpeg_location:
@@ -2162,9 +2127,7 @@ def download_audio(
                     f"Original error: {error_msg}"
                 ) from e
             elif "Video unavailable" in error_msg or "Private video" in error_msg:
-                raise AudioDownloadError(
-                    f"Video is unavailable or private: {error_msg}"
-                ) from e
+                raise AudioDownloadError(f"Video is unavailable or private: {error_msg}") from e
             else:
                 raise AudioDownloadError(f"Download failed: {error_msg}") from e
 
@@ -2176,9 +2139,7 @@ def download_audio(
             max_audio_size_mb = _max_audio_size_mb()
             if size_mb > max_audio_size_mb:
                 os.remove(audio_file)
-                raise FileValidationError(
-                    f"Audio file too large: {size_mb:.1f}MB (max: {max_audio_size_mb}MB)"
-                )
+                raise FileValidationError(f"Audio file too large: {size_mb:.1f}MB (max: {max_audio_size_mb}MB)")
             logger.info(f"Audio downloaded successfully: {audio_file} ({size_mb:.1f}MB)")
         else:
             # Check if file exists with different extension
@@ -2186,9 +2147,7 @@ def download_audio(
             if possible_files:
                 actual_file = possible_files[0]
                 logger.warning(f"Expected {audio_file} but found {actual_file}")
-                raise AudioDownloadError(
-                    f"Audio file conversion may have failed. Found: {actual_file}"
-                )
+                raise AudioDownloadError(f"Audio file conversion may have failed. Found: {actual_file}")
             else:
                 raise AudioDownloadError(
                     f"Audio file not found after download: {audio_file}\n"
@@ -2290,7 +2249,7 @@ def _maybe_preprocess_audio_path(
             decoded_temp_path,
         ]
         try:
-            subprocess.run(decode_cmd, check=True, capture_output=True, timeout=MEDIA_CMD_TIMEOUT)
+            subprocess.run(decode_cmd, check=True, capture_output=True, timeout=MEDIA_TRANSCODE_TIMEOUT)
             preprocess_input_path = decoded_temp_path
             logger.info("Decoded non-WAV input to temporary WAV before preprocessing")
         except subprocess.TimeoutExpired as exc:
@@ -2415,7 +2374,7 @@ def _setup_device_and_compute_type(
                         gpu_memory = torch_module.cuda.get_device_properties(0).total_memory / 1024**3
                         logger.info(f"GPU Accelerated: {gpu_name} ({gpu_memory:.1f} GB)")
                         logger.info(
-                            f"GPU Memory Allocated: {int(gpu_memory_fraction*100)}% "
+                            f"GPU Memory Allocated: {int(gpu_memory_fraction * 100)}% "
                             f"({gpu_memory * gpu_memory_fraction:.1f} GB for maximum performance)"
                         )
                 elif verbose:
@@ -2505,6 +2464,7 @@ class _WhisperExecutionState:
     pipeline: Any
     device: str
     compute_type: str
+    ffmpeg_location: Optional[str] = None
 
 
 def _initialize_whisper_execution(
@@ -2539,15 +2499,14 @@ def _initialize_whisper_execution(
         pipeline=pipeline,
         device=device,
         compute_type=compute_type,
+        ffmpeg_location=ffmpeg_location,
     )
 
 
 def _log_whisper_info(info: Any) -> None:
     """Log the shared metadata emitted by faster-whisper after a run."""
-    logger.info(f"Audio duration: {info.duration/60:.1f} minutes")
-    logger.info(
-        f"Language detected: {info.language} (probability: {info.language_probability:.2f})"
-    )
+    logger.info(f"Audio duration: {info.duration / 60:.1f} minutes")
+    logger.info(f"Language detected: {info.language} (probability: {info.language_probability:.2f})")
     logger.info("-" * 50)
 
 
@@ -2594,7 +2553,7 @@ def _split_segment_text_for_log(text: str, *, max_chars: int = 160) -> list[str]
 
 def _iter_segment_log_lines(start_seconds: float, end_seconds: float, text: str) -> list[str]:
     """Format a transcript segment as one or more readable process-log lines."""
-    timestamp = f"[{start_seconds/60:05.1f}m -> {end_seconds/60:05.1f}m]"
+    timestamp = f"[{start_seconds / 60:05.1f}m -> {end_seconds / 60:05.1f}m]"
     text_lines = _split_segment_text_for_log(text)
     if not text_lines:
         return [timestamp]
@@ -2756,10 +2715,7 @@ def transcribe_audio(
             ffmpeg_location=ffmpeg_location,
             ffmpeg_context="Whisper",
             verbose=True,
-            load_message=(
-                f"Loading faster-whisper '{config.whisper_model}' model "
-                "(best accuracy, ~3GB download on first run)..."
-            ),
+            load_message=(f"Loading faster-whisper '{config.whisper_model}' model (best accuracy, ~3GB download on first run)..."),
             optimized_message="Using optimized CTranslate2 backend with batch processing for 2-4x speedup...",
         )
         device = execution_state.device
@@ -2792,8 +2748,8 @@ def transcribe_audio(
                 progress = ((segment.end / audio_duration_local) * 100) if audio_duration_local > 0 else 0
                 logger.info(
                     f"Progress: {progress:.1f}% | "
-                    f"[{segment.start/60:.1f}m - {segment.end/60:.1f}m] | "
-                    f"Speed: {segment.end/elapsed:.1f}x real-time"
+                    f"[{segment.start / 60:.1f}m - {segment.end / 60:.1f}m] | "
+                    f"Speed: {segment.end / elapsed:.1f}x real-time"
                 )
                 last_print_time = current_time
 
@@ -2817,9 +2773,7 @@ def transcribe_audio(
                 "batch_size": _cpu_fallback_batch_size(config),
             },
             before_retry=(
-                lambda: torch_module.cuda.empty_cache()
-                if torch_module is not None and torch_module.cuda.is_available()
-                else None
+                lambda: torch_module.cuda.empty_cache() if torch_module is not None and torch_module.cuda.is_available() else None
             ),
             segment_observer=_observe_segment,
         )
@@ -2827,9 +2781,7 @@ def transcribe_audio(
         audio_duration = info.duration
 
         if transcription_result_looks_suspicious(segments_data, input_duration=audio_duration):
-            logger.warning(
-                "Primary transcription output looks suspicious; retrying with stricter anti-hallucination settings."
-            )
+            logger.warning("Primary transcription output looks suspicious; retrying with stricter anti-hallucination settings.")
             retry_kwargs = build_suspicion_retry_kwargs(transcribe_kwargs)
             segments_data, info, execution_state = _run_whisper_transcription(
                 execution_state,
@@ -2841,9 +2793,7 @@ def transcribe_audio(
                     "batch_size": _cpu_fallback_batch_size(config),
                 },
                 before_retry=(
-                    lambda: torch_module.cuda.empty_cache()
-                    if torch_module is not None and torch_module.cuda.is_available()
-                    else None
+                    lambda: torch_module.cuda.empty_cache() if torch_module is not None and torch_module.cuda.is_available() else None
                 ),
                 pass_name="anti-hallucination-retry",
                 segment_observer=_observe_segment,
@@ -2875,10 +2825,9 @@ def transcribe_audio(
         logger.info("-" * 50)
         logger.info("Transcription completed!")
         logger.info(f"Segments processed: {segment_count}")
-        logger.info(f"Processing time: {elapsed_time/60:.1f} minutes ({elapsed_time:.1f}s)")
+        logger.info(f"Processing time: {elapsed_time / 60:.1f} minutes ({elapsed_time:.1f}s)")
         logger.info(
-            f"Speed: {speed_factor:.1f}x real-time "
-            f"(processed {audio_duration/60:.1f} min of audio in {elapsed_time/60:.1f} min)"
+            f"Speed: {speed_factor:.1f}x real-time (processed {audio_duration / 60:.1f} min of audio in {elapsed_time / 60:.1f} min)"
         )
 
         # Show GPU memory usage
@@ -2961,13 +2910,9 @@ def transcribe_local_file(
     file_size_mb = os.path.getsize(file_path) / (1024**2)
     max_audio_size_mb = _max_audio_size_mb()
     if file_ext not in VIDEO_EXTENSIONS and file_size_mb > max_audio_size_mb:
-        raise FileValidationError(
-            f"Audio file too large: {file_size_mb:.1f}MB (max: {max_audio_size_mb}MB)"
-        )
+        raise FileValidationError(f"Audio file too large: {file_size_mb:.1f}MB (max: {max_audio_size_mb}MB)")
     if file_ext in VIDEO_EXTENSIONS and file_size_mb > max_audio_size_mb:
-        logger.info(
-            f"Video file is large ({file_size_mb:.1f}MB) but size limit applies to audio; continuing."
-        )
+        logger.info(f"Video file is large ({file_size_mb:.1f}MB) but size limit applies to audio; continuing.")
 
     logger.info(f"Processing local file: {file_path} ({file_size_mb:.1f}MB)")
     logger.info("-" * 50)
@@ -3052,6 +2997,18 @@ def transcribe_local_file(
             else:
                 logger.warning("Audio extraction failed; transcribing original video file directly.")
 
+        if active_execution_state is not None:
+            desired_device, desired_compute_type = _setup_device_and_compute_type(config=config, verbose=False)
+            cached_ffmpeg_location = getattr(active_execution_state, "ffmpeg_location", None)
+            if (
+                active_execution_state.model_name != config.whisper_model
+                or active_execution_state.device != desired_device
+                or active_execution_state.compute_type != desired_compute_type
+                or os.path.normcase(cached_ffmpeg_location or "") != os.path.normcase(ffmpeg_location or "")
+            ):
+                logger.info("Discarding stale faster-whisper runtime after config or FFmpeg path changed.")
+                active_execution_state = None
+
         if active_execution_state is None:
             active_execution_state = _initialize_whisper_execution(
                 config.whisper_model,
@@ -3082,7 +3039,7 @@ def transcribe_local_file(
 
         input_duration = _probe_duration_seconds(transcription_input_path, ffmpeg_location)
         if input_duration is not None:
-            logger.info(f"Input duration estimate: {input_duration/60:.1f} minutes")
+            logger.info(f"Input duration estimate: {input_duration / 60:.1f} minutes")
 
         def _generate_clip_timestamps(duration_seconds: float, *, chunk_seconds: float = 30.0) -> list[dict[str, float]]:
             clips: list[dict[str, float]] = []
@@ -3102,20 +3059,14 @@ def transcribe_local_file(
                 return
             if input_duration is None:
                 # faster-whisper requires clip_timestamps when vad_filter=False for long audio.
-                logger.warning(
-                    "vad_filter=False but duration could not be determined; enabling VAD to avoid faster-whisper error."
-                )
+                logger.warning("vad_filter=False but duration could not be determined; enabling VAD to avoid faster-whisper error.")
                 kwargs["vad_filter"] = True
                 default_vad_params = transcribe_kwargs.get("vad_parameters")
-                kwargs["vad_parameters"] = (
-                    dict(default_vad_params) if isinstance(default_vad_params, dict) else {}
-                )
+                kwargs["vad_parameters"] = dict(default_vad_params) if isinstance(default_vad_params, dict) else {}
                 return
             kwargs["clip_timestamps"] = _generate_clip_timestamps(input_duration)
 
-        def _transcribe_with_cuda_fallback(
-            pass_name: str, *, kwargs: dict[str, Any]
-        ) -> tuple[TranscriptSegments, Any]:
+        def _transcribe_with_cuda_fallback(pass_name: str, *, kwargs: dict[str, Any]) -> tuple[TranscriptSegments, Any]:
             nonlocal active_execution_state
             _ensure_clip_timestamps_for_long_audio(kwargs)
             assert active_execution_state is not None
@@ -3149,9 +3100,7 @@ def transcribe_local_file(
                     "batch_size": _cpu_fallback_batch_size(config),
                 },
                 before_retry=(
-                    lambda: torch_module.cuda.empty_cache()
-                    if torch_module is not None and torch_module.cuda.is_available()
-                    else None
+                    lambda: torch_module.cuda.empty_cache() if torch_module is not None and torch_module.cuda.is_available() else None
                 ),
                 pass_name=pass_name,
                 segment_observer=_observe_segment,
@@ -3176,9 +3125,7 @@ def transcribe_local_file(
                 "min_silence_duration_ms": min(config.min_silence_duration_ms, 500),
                 "speech_pad_ms": config.speech_pad_ms,
             }
-            relaxed_kwargs["no_speech_threshold"] = min(
-                float(relaxed_kwargs.get("no_speech_threshold", 0.3)), 0.1
-            )
+            relaxed_kwargs["no_speech_threshold"] = min(float(relaxed_kwargs.get("no_speech_threshold", 0.3)), 0.1)
             relaxed_kwargs["log_prob_threshold"] = -2.0
             return relaxed_kwargs
 
@@ -3201,12 +3148,7 @@ def transcribe_local_file(
             segments_data = _try_transcribe("no-vad", _build_no_vad_kwargs())
 
         # If still empty and we have multiple audio streams, try other streams (common in meeting recordings).
-        if (
-            not segments_data
-            and file_ext in VIDEO_EXTENSIONS
-            and ranked_audio_streams
-            and len(ranked_audio_streams) > 1
-        ):
+        if not segments_data and file_ext in VIDEO_EXTENSIONS and ranked_audio_streams and len(ranked_audio_streams) > 1:
             for candidate in ranked_audio_streams[1:5]:
                 logger.warning(
                     "No speech detected on selected audio stream; trying alternate stream %s",
@@ -3228,15 +3170,8 @@ def transcribe_local_file(
                     logger.info("Selected alternate stream for transcription: %s", candidate.describe())
                     break
 
-        if (
-            not segments_data
-            and file_ext in VIDEO_EXTENSIONS
-            and best_stream_low_energy
-            and selected_audio_index is not None
-        ):
-            logger.warning(
-                "Audio energy is extremely low; retrying after applying +30dB gain during extraction."
-            )
+        if not segments_data and file_ext in VIDEO_EXTENSIONS and best_stream_low_energy and selected_audio_index is not None:
+            logger.warning("Audio energy is extremely low; retrying after applying +30dB gain during extraction.")
             extracted_gain = _create_temp_wav(audio_index=selected_audio_index, gain_db=30.0)
             if extracted_gain is not None:
                 transcription_input_path = _prepare_transcription_input(extracted_gain)
@@ -3282,7 +3217,6 @@ def transcribe_local_file(
                 pass
 
 
-
 def resolve_output_path(candidate: str, *, base_dir: Optional[Path] = None) -> Path:
     """Resolve a user-provided output path within a trusted base directory."""
     base = base_dir or Path.cwd()
@@ -3307,7 +3241,7 @@ def save_transcript(
     video_id: str,
     output_file: Optional[str] = None,
     segments_data: TranscriptSegments | None = None,
-    output_format: str = "plain"
+    output_format: str = "plain",
 ) -> Optional[str]:
     """Save transcript to a text file with atomic write operation.
 
@@ -3376,7 +3310,7 @@ Examples:
   python youtube_transcriber.py https://www.youtube.com/watch?v=dQw4w9WgXcQ output.txt
   python youtube_transcriber.py https://www.youtube.com/watch?v=dQw4w9WgXcQ --format timestamped
   python youtube_transcriber.py https://www.youtube.com/watch?v=dQw4w9WgXcQ --verbose
-        """
+        """,
     )
     parser.add_argument("youtube_url", help="YouTube video URL")
     parser.add_argument("output_file", nargs="?", default=None, help="Output file path (optional)")
@@ -3384,14 +3318,9 @@ Examples:
         "--format",
         choices=["plain", "timestamped"],
         default="plain",
-        help="Output format: 'plain' for text only, 'timestamped' for text with timestamps (default: plain)"
+        help="Output format: 'plain' for text only, 'timestamped' for text with timestamps (default: plain)",
     )
-    parser.add_argument(
-        "--verbose",
-        "-v",
-        action="store_true",
-        help="Enable verbose debug logging"
-    )
+    parser.add_argument("--verbose", "-v", action="store_true", help="Enable verbose debug logging")
 
     args = parser.parse_args()
 
@@ -3429,9 +3358,7 @@ Examples:
         # Find FFmpeg location once for both download and transcription
         ffmpeg_location = find_ffmpeg()
 
-        audio_file = download_audio(
-            args.youtube_url, f"temp_audio_{video_id}", ffmpeg_location
-        )
+        audio_file = download_audio(args.youtube_url, f"temp_audio_{video_id}", ffmpeg_location)
 
         if not audio_file:
             logger.error("Failed to download audio. Exiting.")
@@ -3443,13 +3370,7 @@ Examples:
     # Save transcript
     if transcript:
         logger.info("-" * 50)
-        save_transcript(
-            transcript,
-            video_id,
-            args.output_file,
-            segments_data=segments_data,
-            output_format=args.format
-        )
+        save_transcript(transcript, video_id, args.output_file, segments_data=segments_data, output_format=args.format)
         logger.info("\nTranscription complete!")
     else:
         logger.error("Failed to obtain transcript. Exiting.")
@@ -3458,4 +3379,3 @@ Examples:
 
 if __name__ == "__main__":
     main()
-

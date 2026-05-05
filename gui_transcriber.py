@@ -98,21 +98,14 @@ TRANSCRIPTION_SETTING_HELP_TEXTS: dict[str, str] = {
         "Speed favors turnaround time, Balanced is the middle ground, and Maximum Accuracy uses heavier decoding.\n"
         "You can still tweak any setting afterward."
     ),
-    "Model:": (
-        "Uses Whisper Large v3 for local transcription.\n"
-        "This is the single supported local Whisper model for this app."
-    ),
+    "Model:": ("Uses Whisper Large v3 for local transcription.\nThis is the single supported local Whisper model for this app."),
     "Backend:": (
         "Choose the batch transcription engine for YouTube fallback and local files.\n"
         "OpenAI uses the cloud API, Local Whisper uses the installed model, and Compare runs both."
     ),
-    "OpenAI Model:": (
-        "Choose the OpenAI model for batch audio/video transcription.\n"
-        "This requires OPENAI_API_KEY in the environment."
-    ),
+    "OpenAI Model:": ("Choose the OpenAI model for batch audio/video transcription.\nThis requires OPENAI_API_KEY in the environment."),
     "Language:": (
-        "Optionally force a language code such as en, en-US, es, or fr.\n"
-        "Leave this blank to let Whisper auto-detect the language."
+        "Optionally force a language code such as en, en-US, es, or fr.\nLeave this blank to let Whisper auto-detect the language."
     ),
     "Hotwords:": (
         "Recognition hints for names, acronyms, and jargon.\n"
@@ -127,14 +120,8 @@ TRANSCRIPTION_SETTING_HELP_TEXTS: dict[str, str] = {
         "Removes filler words such as um, uh, you know, and similar speech clutter.\n"
         "Leave this off if you want the most faithful verbatim transcript."
     ),
-    "Noise Reduction": (
-        "Applies spectral denoising before Whisper runs.\n"
-        "Useful for hiss, fans, HVAC, or steady room noise."
-    ),
-    "Normalize Audio": (
-        "Applies loudness normalization before Whisper runs.\n"
-        "Useful when speech is too quiet or inconsistent."
-    ),
+    "Noise Reduction": ("Applies spectral denoising before Whisper runs.\nUseful for hiss, fans, HVAC, or steady room noise."),
+    "Normalize Audio": ("Applies loudness normalization before Whisper runs.\nUseful when speech is too quiet or inconsistent."),
     "Filter Hallucinations": (
         "Removes common silence, music, and low-signal junk phrases Whisper can invent.\n"
         "This is one of the main transcript-safety guardrails."
@@ -143,100 +130,49 @@ TRANSCRIPTION_SETTING_HELP_TEXTS: dict[str, str] = {
         "Collapses obvious repeated decode loops before the transcript is shown.\n"
         "Useful when the model gets stuck repeating the same phrase."
     ),
-    "Word Timestamps": (
-        "Keeps word-level timing when the backend provides it.\n"
-        "Useful for precise timestamps and subtitle work."
-    ),
+    "Word Timestamps": ("Keeps word-level timing when the backend provides it.\nUseful for precise timestamps and subtitle work."),
     "Context Carryover": (
-        "Lets earlier decoded text influence later segments.\n"
-        "This can improve continuity, but it can also carry mistakes forward."
+        "Lets earlier decoded text influence later segments.\nThis can improve continuity, but it can also carry mistakes forward."
     ),
     "Use VAD": (
-        "Uses voice activity detection to isolate speech before Whisper decodes.\n"
-        "Usually helpful for meetings and mixed-noise recordings."
+        "Uses voice activity detection to isolate speech before Whisper decodes.\nUsually helpful for meetings and mixed-noise recordings."
     ),
     "Device:": (
-        "Select the preferred runtime device.\n"
-        "Auto chooses GPU when available, Prefer GPU pushes for CUDA, and Force CPU disables GPU use."
+        "Select the preferred runtime device.\nAuto chooses GPU when available, Prefer GPU pushes for CUDA, and Force CPU disables GPU use."
     ),
     "Compute:": (
-        "Select the model compute type.\n"
-        "Auto picks float16 on GPU and int8 on CPU.\n"
-        "Lower-precision modes can reduce memory usage."
+        "Select the model compute type.\nAuto picks float16 on GPU and int8 on CPU.\nLower-precision modes can reduce memory usage."
     ),
-    "Batch:": (
-        "Controls how many chunks Whisper processes together.\n"
-        "Higher values are usually faster, but they need more VRAM or RAM."
-    ),
+    "Batch:": ("Controls how many chunks Whisper processes together.\nHigher values are usually faster, but they need more VRAM or RAM."),
     "CPU Fallback Batch:": (
-        "Backup batch size used if the transcription falls back to CPU.\n"
-        "Keep this lower than the main batch size to avoid CPU overload."
+        "Backup batch size used if the transcription falls back to CPU.\nKeep this lower than the main batch size to avoid CPU overload."
     ),
-    "Beam:": (
-        "Beam search width.\n"
-        "Higher values can improve accuracy, but they slow decoding."
-    ),
-    "Temperature:": (
-        "Decoding randomness.\n"
-        "Lower values are more deterministic; 0.0 is the most stable."
-    ),
+    "Beam:": ("Beam search width.\nHigher values can improve accuracy, but they slow decoding."),
+    "Temperature:": ("Decoding randomness.\nLower values are more deterministic; 0.0 is the most stable."),
     "GPU Memory %:": (
         "Best-effort PyTorch VRAM budget for torch-based components.\n"
         "Higher values allow more headroom for GPU work, but this is not a strict hard cap for every backend."
     ),
     "No-Speech Threshold:": (
-        "How easily Whisper decides that a chunk is silence.\n"
-        "Lower values make it more willing to transcribe faint speech."
+        "How easily Whisper decides that a chunk is silence.\nLower values make it more willing to transcribe faint speech."
     ),
-    "VAD Threshold:": (
-        "How strict the speech detector is.\n"
-        "Higher values are stricter and may ignore quieter speech."
-    ),
-    "Min Speech (ms):": (
-        "Minimum speech fragment length the VAD will keep.\n"
-        "Shorter fragments than this are treated as noise."
-    ),
-    "Min Silence (ms):": (
-        "How much silence is required before VAD splits speech into a new chunk."
-    ),
+    "VAD Threshold:": ("How strict the speech detector is.\nHigher values are stricter and may ignore quieter speech."),
+    "Min Speech (ms):": ("Minimum speech fragment length the VAD will keep.\nShorter fragments than this are treated as noise."),
+    "Min Silence (ms):": ("How much silence is required before VAD splits speech into a new chunk."),
     "Speech Pad (ms):": (
-        "Extra audio kept before and after each detected speech region.\n"
-        "This helps prevent clipped word starts or endings."
+        "Extra audio kept before and after each detected speech region.\nThis helps prevent clipped word starts or endings."
     ),
-    "Repetition Penalty:": (
-        "Discourages the decoder from repeating the same text over and over.\n"
-        "Higher values are more aggressive."
-    ),
-    "No-Repeat N-gram:": (
-        "Blocks repeated word groups of the given size.\n"
-        "Use 0 to effectively disable this guardrail."
-    ),
+    "Repetition Penalty:": ("Discourages the decoder from repeating the same text over and over.\nHigher values are more aggressive."),
+    "No-Repeat N-gram:": ("Blocks repeated word groups of the given size.\nUse 0 to effectively disable this guardrail."),
     "Patience:": (
-        "How long beam search keeps exploring alternate candidates.\n"
-        "Higher values can help difficult audio, but they are slower."
+        "How long beam search keeps exploring alternate candidates.\nHigher values can help difficult audio, but they are slower."
     ),
-    "Length Penalty:": (
-        "Bias toward shorter or longer outputs.\n"
-        "1.0 is neutral."
-    ),
-    "Hallucination Silence:": (
-        "Extra silence-based safeguard used during decoding to reduce hallucinated output."
-    ),
-    "Grammar Backend:": (
-        "Choose which grammar engine to use.\n"
-        "Auto prefers GECToR and falls back to LanguageTool when needed."
-    ),
-    "Grammar Language:": (
-        "Locale used for grammar rules, such as en-US."
-    ),
-    "GECToR Batch:": (
-        "Batch size for the grammar correction model.\n"
-        "Higher values are faster on strong GPUs, but use more memory."
-    ),
-    "GECToR Iterations:": (
-        "How many correction passes GECToR makes.\n"
-        "More passes can clean more text, but they can also over-edit."
-    ),
+    "Length Penalty:": ("Bias toward shorter or longer outputs.\n1.0 is neutral."),
+    "Hallucination Silence:": ("Extra silence-based safeguard used during decoding to reduce hallucinated output."),
+    "Grammar Backend:": ("Choose which grammar engine to use.\nAuto prefers GECToR and falls back to LanguageTool when needed."),
+    "Grammar Language:": ("Locale used for grammar rules, such as en-US."),
+    "GECToR Batch:": ("Batch size for the grammar correction model.\nHigher values are faster on strong GPUs, but use more memory."),
+    "GECToR Iterations:": ("How many correction passes GECToR makes.\nMore passes can clean more text, but they can also over-edit."),
 }
 
 
@@ -339,7 +275,7 @@ class QueueHandler(logging.Handler):
     def __init__(self, target_queue: queue.Queue[QueueMessage]):
         super().__init__()
         self._target_queue = target_queue
-        self.setFormatter(logging.Formatter('%(message)s'))
+        self.setFormatter(logging.Formatter("%(message)s"))
 
     def emit(self, record: logging.LogRecord) -> None:
         try:
@@ -446,7 +382,7 @@ def setup_gui_logging(target_queue: queue.Queue[QueueMessage]) -> None:
     gui_logger.addHandler(file_handler)
     gui_logger.addHandler(queue_handler)
 
-    logging.getLogger('PyQt6').setLevel(logging.WARNING)
+    logging.getLogger("PyQt6").setLevel(logging.WARNING)
 
 
 @contextmanager
@@ -530,9 +466,7 @@ def _apply_optional_grammar_corrections(
     if processed_segments is None:
         processed_segments = segments_data
 
-    target_queue.put(
-        ("progress", success_progress if grammar_enhanced else no_change_progress)
-    )
+    target_queue.put(("progress", success_progress if grammar_enhanced else no_change_progress))
     return GrammarPassResult(processed_transcript, processed_segments, grammar_enhanced, True)
 
 
@@ -913,10 +847,7 @@ class TranscriberGUI(QtWidgets.QMainWindow):
 
         # Content splitter with responsive layout
         self.content_splitter = ResponsiveSplitter(QtCore.Qt.Orientation.Vertical, self)
-        self.content_splitter.setSizePolicy(
-            QtWidgets.QSizePolicy.Policy.Expanding,
-            QtWidgets.QSizePolicy.Policy.Expanding
-        )
+        self.content_splitter.setSizePolicy(QtWidgets.QSizePolicy.Policy.Expanding, QtWidgets.QSizePolicy.Policy.Expanding)
 
         # Build content cards
         self._progress_card = self._build_progress_card()
@@ -947,27 +878,19 @@ class TranscriberGUI(QtWidgets.QMainWindow):
         status_bar.setSizeGripEnabled(False)
 
         self.status_label = QtWidgets.QLabel("")
-        self.status_label.setAlignment(
-            QtCore.Qt.AlignmentFlag.AlignVCenter | QtCore.Qt.AlignmentFlag.AlignLeft
-        )
+        self.status_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignVCenter | QtCore.Qt.AlignmentFlag.AlignLeft)
         self.status_label.setStyleSheet(self.theme.get_status_style("success"))
 
         self.gpu_status_label = QtWidgets.QLabel("GPU: Detecting...")
-        self.gpu_status_label.setAlignment(
-            QtCore.Qt.AlignmentFlag.AlignVCenter | QtCore.Qt.AlignmentFlag.AlignCenter
-        )
+        self.gpu_status_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignVCenter | QtCore.Qt.AlignmentFlag.AlignCenter)
         self.gpu_status_label.setStyleSheet(self.theme.get_gpu_status_style(has_gpu=False))
 
         self.openai_status_label = QtWidgets.QLabel("")
-        self.openai_status_label.setAlignment(
-            QtCore.Qt.AlignmentFlag.AlignVCenter | QtCore.Qt.AlignmentFlag.AlignCenter
-        )
+        self.openai_status_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignVCenter | QtCore.Qt.AlignmentFlag.AlignCenter)
         self._refresh_openai_status()
 
         self.recording_duration_label = QtWidgets.QLabel("")
-        self.recording_duration_label.setAlignment(
-            QtCore.Qt.AlignmentFlag.AlignVCenter | QtCore.Qt.AlignmentFlag.AlignRight
-        )
+        self.recording_duration_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignVCenter | QtCore.Qt.AlignmentFlag.AlignRight)
         self.recording_duration_label.setStyleSheet(
             f"color: {self.theme.colors.recording}; font-weight: 600; font-family: 'Consolas', monospace;"
         )
@@ -1221,9 +1144,7 @@ class TranscriberGUI(QtWidgets.QMainWindow):
         row2.addWidget(self._wrap_setting_widget_with_help(self.filler_cleanup_checkbox, filler_cleanup_tooltip))
         row2.addWidget(self._wrap_setting_widget_with_help(self.noise_reduction_checkbox, noise_reduction_tooltip))
         row2.addWidget(self._wrap_setting_widget_with_help(self.normalize_audio_checkbox, normalize_audio_tooltip))
-        row2.addWidget(
-            self._wrap_setting_widget_with_help(self.filter_hallucinations_checkbox, hallucination_filter_tooltip)
-        )
+        row2.addWidget(self._wrap_setting_widget_with_help(self.filter_hallucinations_checkbox, hallucination_filter_tooltip))
         row2.addWidget(self._wrap_setting_widget_with_help(self.deduplicate_checkbox, deduplicate_tooltip))
         row2.addStretch(1)
 
@@ -1248,9 +1169,7 @@ class TranscriberGUI(QtWidgets.QMainWindow):
         row3.addStretch(1)
 
         advanced_label = QtWidgets.QLabel("Advanced Runtime")
-        advanced_label.setStyleSheet(
-            f"color: {self.theme.colors.text_secondary}; font-weight: 600; letter-spacing: 0.5px;"
-        )
+        advanced_label.setStyleSheet(f"color: {self.theme.colors.text_secondary}; font-weight: 600; letter-spacing: 0.5px;")
 
         advanced_grid = QtWidgets.QGridLayout()
         advanced_grid.setHorizontalSpacing(10)
@@ -1368,9 +1287,7 @@ class TranscriberGUI(QtWidgets.QMainWindow):
         _add_labeled_widget(
             advanced_grid, row=0, column_pair=1, label_text="Compute:", widget=self.compute_type_combo, tooltip=compute_tooltip
         )
-        _add_labeled_widget(
-            advanced_grid, row=0, column_pair=2, label_text="Batch:", widget=self.batch_size_spin, tooltip=batch_tooltip
-        )
+        _add_labeled_widget(advanced_grid, row=0, column_pair=2, label_text="Batch:", widget=self.batch_size_spin, tooltip=batch_tooltip)
         _add_labeled_widget(
             advanced_grid,
             row=0,
@@ -1380,9 +1297,7 @@ class TranscriberGUI(QtWidgets.QMainWindow):
             tooltip=cpu_fallback_batch_tooltip,
         )
 
-        _add_labeled_widget(
-            advanced_grid, row=1, column_pair=0, label_text="Beam:", widget=self.beam_size_spin, tooltip=beam_tooltip
-        )
+        _add_labeled_widget(advanced_grid, row=1, column_pair=0, label_text="Beam:", widget=self.beam_size_spin, tooltip=beam_tooltip)
         _add_labeled_widget(
             advanced_grid,
             row=1,
@@ -1521,9 +1436,7 @@ class TranscriberGUI(QtWidgets.QMainWindow):
         """Update the grammar status indicator."""
         if not self.grammar_enhance_checkbox.isChecked():
             self.grammar_status_label.setText("(Off)")
-            self.grammar_status_label.setStyleSheet(
-                f"color: {self.theme.colors.text_secondary}; font-size: 11px;"
-            )
+            self.grammar_status_label.setStyleSheet(f"color: {self.theme.colors.text_secondary}; font-size: 11px;")
             return
 
         grammar_config = self._build_grammar_config()
@@ -1576,10 +1489,7 @@ class TranscriberGUI(QtWidgets.QMainWindow):
         self.progress_output.setReadOnly(True)
         self.progress_output.setPlaceholderText("Verbose runtime output appears here...")
         self.progress_output.setMinimumHeight(120)
-        self.progress_output.setSizePolicy(
-            QtWidgets.QSizePolicy.Policy.Expanding,
-            QtWidgets.QSizePolicy.Policy.Expanding
-        )
+        self.progress_output.setSizePolicy(QtWidgets.QSizePolicy.Policy.Expanding, QtWidgets.QSizePolicy.Policy.Expanding)
 
         card.addWidget(self.progress_output, stretch=1)
         return card
@@ -1592,10 +1502,7 @@ class TranscriberGUI(QtWidgets.QMainWindow):
         self.transcript_edit.setObjectName("TranscriptOutput")
         self.transcript_edit.setPlaceholderText("Transcript appears here...")
         self.transcript_edit.setMinimumHeight(80)
-        self.transcript_edit.setSizePolicy(
-            QtWidgets.QSizePolicy.Policy.Expanding,
-            QtWidgets.QSizePolicy.Policy.Expanding
-        )
+        self.transcript_edit.setSizePolicy(QtWidgets.QSizePolicy.Policy.Expanding, QtWidgets.QSizePolicy.Policy.Expanding)
 
         card.addWidget(self.transcript_edit, stretch=1)
         return card
@@ -1725,9 +1632,23 @@ class TranscriberGUI(QtWidgets.QMainWindow):
         # Keywords for scoring microphones (higher score = better)
         # Dedicated USB/XLR microphones (highest priority)
         premium_mics = {
-            "pd200x", "podcast", "maono", "blue yeti", "blue snowball",
-            "shure", "rode", "audio-technica", "at2020", "samson", "fifine",
-            "hyperx", "elgato", "razer seiren", "jlab", "tonor", "condenser",
+            "pd200x",
+            "podcast",
+            "maono",
+            "blue yeti",
+            "blue snowball",
+            "shure",
+            "rode",
+            "audio-technica",
+            "at2020",
+            "samson",
+            "fifine",
+            "hyperx",
+            "elgato",
+            "razer seiren",
+            "jlab",
+            "tonor",
+            "condenser",
         }
         # Standard built-in microphones (medium priority)
         standard_mics = {"realtek", "high definition audio"}
@@ -1735,9 +1656,19 @@ class TranscriberGUI(QtWidgets.QMainWindow):
         webcam_mics = {"webcam", "camera", "nexigo", "logitech c"}
         # Virtual/loopback devices to avoid (negative score)
         virtual_keywords = {
-            "virtual", "loopback", "sound mapper", "stereo mix", "wave",
-            "voicemod", "vb-audio", "cable", "oculus", "vad wave",
-            "what u hear", "mix", "desktop audio",
+            "virtual",
+            "loopback",
+            "sound mapper",
+            "stereo mix",
+            "wave",
+            "voicemod",
+            "vb-audio",
+            "cable",
+            "oculus",
+            "vad wave",
+            "what u hear",
+            "mix",
+            "desktop audio",
         }
         # Generic system devices (low priority)
         generic_keywords = {"primary sound capture", "default", "input ()"}
@@ -1781,8 +1712,8 @@ class TranscriberGUI(QtWidgets.QMainWindow):
 
             # Slight bonus for being marked as default input
             try:
-                default_input = sd.query_devices(kind='input')
-                if default_input and default_input.get('name') == device.get('name'):
+                default_input = sd.query_devices(kind="input")
+                if default_input and default_input.get("name") == device.get("name"):
                     score += 15
             except Exception as exc:
                 gui_logger.debug("Could not query default input device for scoring", exc_info=exc)
@@ -1842,9 +1773,7 @@ class TranscriberGUI(QtWidgets.QMainWindow):
             cursor = QtGui.QTextCursor(doc)
             cursor.movePosition(QtGui.QTextCursor.MoveOperation.Start)
             cursor.movePosition(
-                QtGui.QTextCursor.MoveOperation.Down,
-                QtGui.QTextCursor.MoveMode.KeepAnchor,
-                doc.lineCount() - MAX_LOG_LINES
+                QtGui.QTextCursor.MoveOperation.Down, QtGui.QTextCursor.MoveMode.KeepAnchor, doc.lineCount() - MAX_LOG_LINES
             )
             cursor.removeSelectedText()
 
@@ -2009,8 +1938,7 @@ class TranscriberGUI(QtWidgets.QMainWindow):
                     self.output_queue.put(
                         (
                             "progress",
-                            "No captions found. Falling back to audio download + "
-                            f"{backend} transcription...\n",
+                            f"No captions found. Falling back to audio download + {backend} transcription...\n",
                         )
                     )
 
@@ -2034,7 +1962,7 @@ class TranscriberGUI(QtWidgets.QMainWindow):
                     if backend in {"openai", "compare"} and not is_openai_api_configured():
                         if audio_file and os.path.exists(audio_file):
                             os.remove(audio_file)
-                        self.output_queue.put(("error", "OPENAI_API_KEY is not set. Rotate the exposed key and set a fresh key."))
+                        self.output_queue.put(("error", "OPENAI_API_KEY is not set. Set a valid key before using OpenAI transcription."))
                         return
 
                     if backend == "openai":
@@ -2055,17 +1983,23 @@ class TranscriberGUI(QtWidgets.QMainWindow):
                             config=transcription_config,
                             cleanup_audio_file=False,
                         )
+                        if openai_transcript is None:
+                            openai_transcript = "[OpenAI transcription failed]"
 
                         self.output_queue.put(("progress", "Running local Whisper transcription for comparison...\n"))
                         unload_gector()
                         torch_module = get_torch(context="gui_transcriber:youtube_empty_cache")
                         if torch_module is not None and torch_module.cuda.is_available():
                             torch_module.cuda.empty_cache()
-                        local_transcript, _local_segments = transcribe_audio(
-                            audio_file,
-                            ffmpeg_location,
-                            config=transcription_config,
-                        )
+                        try:
+                            local_transcript, _local_segments = transcribe_audio(
+                                audio_file,
+                                ffmpeg_location,
+                                config=transcription_config,
+                            )
+                        finally:
+                            if audio_file and os.path.exists(audio_file):
+                                os.remove(audio_file)
                         transcript = _format_backend_comparison(
                             openai_transcript=openai_transcript,
                             local_transcript=local_transcript,
@@ -2144,7 +2078,7 @@ class TranscriberGUI(QtWidgets.QMainWindow):
             "All Media Files (*.mp3 *.mp4 *.wav *.m4a *.flac *.ogg *.avi *.mkv *.mov *.webm *.aac *.wma *.opus);;"
             "Audio Files (*.mp3 *.wav *.m4a *.flac *.ogg *.aac *.wma *.opus);;"
             "Video Files (*.mp4 *.avi *.mkv *.mov *.webm);;"
-            "All Files (*.*)"
+            "All Files (*.*)",
         )
 
         if file_path:
@@ -2184,9 +2118,7 @@ class TranscriberGUI(QtWidgets.QMainWindow):
         )
 
         thread = threading.Thread(
-            target=self.transcribe_local_file_thread,
-            args=(file_path, transcription_config, grammar_config),
-            daemon=True
+            target=self.transcribe_local_file_thread, args=(file_path, transcription_config, grammar_config), daemon=True
         )
         self.transcribe_thread = thread
         try:
@@ -2273,9 +2205,7 @@ class TranscriberGUI(QtWidgets.QMainWindow):
                         ffmpeg_location=ffmpeg_location,
                         config=transcription_config,
                         execution_state=reusable_execution_state,
-                        execution_state_observer=(
-                            captured_execution_state.append if reusable_execution_state is not None else None
-                        ),
+                        execution_state_observer=(captured_execution_state.append if reusable_execution_state is not None else None),
                     )
                 finally:
                     if captured_execution_state:
@@ -2295,8 +2225,7 @@ class TranscriberGUI(QtWidgets.QMainWindow):
                     self.output_queue.put(
                         (
                             "progress",
-                            f"{cuda_retry_progress_prefix}; "
-                            f"retrying full job on CPU (INT8, batch {cpu_config.batch_size})...\n",
+                            f"{cuda_retry_progress_prefix}; retrying full job on CPU (INT8, batch {cpu_config.batch_size})...\n",
                         )
                     )
                     self.output_queue.put(("status", "Retrying local transcription on CPU...", self.theme.colors.warning))
@@ -2308,7 +2237,7 @@ class TranscriberGUI(QtWidgets.QMainWindow):
                 raise
 
         if backend in {"openai", "compare"} and not is_openai_api_configured():
-            self.output_queue.put(("error", "OPENAI_API_KEY is not set. Rotate the exposed key and set a fresh key."))
+            self.output_queue.put(("error", "OPENAI_API_KEY is not set. Set a valid key before using OpenAI transcription."))
             return False
 
         if backend == "openai":
@@ -2322,11 +2251,16 @@ class TranscriberGUI(QtWidgets.QMainWindow):
         elif backend == "compare":
             self.output_queue.put(("status", "Comparing OpenAI and local Whisper...", self.theme.colors.warning))
             self.output_queue.put(("progress", "Running OpenAI transcription first...\n"))
-            openai_transcript, _openai_segments = transcribe_local_file_openai(
-                file_path=file_path,
-                ffmpeg_location=ffmpeg_location,
-                config=transcription_config,
-            )
+            try:
+                openai_transcript, _openai_segments = transcribe_local_file_openai(
+                    file_path=file_path,
+                    ffmpeg_location=ffmpeg_location,
+                    config=transcription_config,
+                )
+            except Exception as exc:
+                gui_logger.warning("OpenAI compare pass failed; continuing with local Whisper: %s", exc)
+                self.output_queue.put(("progress", f"OpenAI transcription failed; continuing with local Whisper: {exc}\n"))
+                openai_transcript = f"[OpenAI transcription failed: {exc}]"
             self.output_queue.put(("progress", "Running local Whisper transcription for comparison...\n"))
             local_transcript, _local_segments = _run_local_whisper()
             transcript = _format_backend_comparison(
@@ -2388,17 +2322,13 @@ class TranscriberGUI(QtWidgets.QMainWindow):
             return
         active_transcription = getattr(self, "transcribe_thread", None)
         if active_transcription and active_transcription.is_alive():
-            self.append_progress(
-                "Wait for the current transcription to finish before starting a new recording.\n"
-            )
+            self.append_progress("Wait for the current transcription to finish before starting a new recording.\n")
             self.update_status("Transcription already in progress", self.theme.colors.warning)
             return
 
         transcription_config = self._build_transcription_config()
         if transcription_config.batch_backend in {"openai", "compare"} and not is_openai_api_configured():
-            self.append_progress(
-                "OPENAI_API_KEY is not set. Rotate the exposed key and set a fresh key before using OpenAI transcription.\n"
-            )
+            self.append_progress("OPENAI_API_KEY is not set. Set a valid key before using OpenAI transcription.\n")
             self.update_status("Missing OPENAI_API_KEY", self.theme.colors.error)
             return
 
@@ -2455,9 +2385,7 @@ class TranscriberGUI(QtWidgets.QMainWindow):
             return None, requested_model_name, requested_device, requested_compute_type
 
         loaded_device = getattr(self, "_whisper_device", "cpu")
-        loaded_compute_type = getattr(self, "_loaded_compute_type", None) or (
-            "float16" if loaded_device == "cuda" else "int8"
-        )
+        loaded_compute_type = getattr(self, "_loaded_compute_type", None) or ("float16" if loaded_device == "cuda" else "int8")
         return (
             _WhisperExecutionState(
                 model_name=requested_model_name,
@@ -2497,8 +2425,7 @@ class TranscriberGUI(QtWidgets.QMainWindow):
             QtWidgets.QMessageBox.warning(
                 self,
                 "No Microphone Selected",
-                "Please select a microphone device before recording.\n\n"
-                "Click the refresh button to scan for available devices."
+                "Please select a microphone device before recording.\n\nClick the refresh button to scan for available devices.",
             )
             return
 
@@ -2565,15 +2492,13 @@ class TranscriberGUI(QtWidgets.QMainWindow):
             self.config.gpu_memory_fraction = self.gpu_memory_spin.value()
         active_config = transcription_config or TranscriptionConfig(**asdict(self.config.transcription))
         requested_model_name = model_name or active_config.whisper_model
-        _resolved_model_name, desired_device, desired_compute_type = (
-            TranscriberGUI._resolve_requested_whisper_runtime(self, active_config)
-        )
+        _resolved_model_name, desired_device, desired_compute_type = TranscriberGUI._resolve_requested_whisper_runtime(self, active_config)
 
         if requested_model_name != _resolved_model_name:
             active_config = TranscriptionConfig(**asdict(active_config))
             active_config.whisper_model = requested_model_name
-            _resolved_model_name, desired_device, desired_compute_type = (
-                TranscriberGUI._resolve_requested_whisper_runtime(self, active_config)
+            _resolved_model_name, desired_device, desired_compute_type = TranscriberGUI._resolve_requested_whisper_runtime(
+                self, active_config
             )
 
         if TranscriberGUI._loaded_whisper_runtime_matches(
@@ -2613,9 +2538,7 @@ class TranscriberGUI(QtWidgets.QMainWindow):
                     if torch_module is not None and torch_module.cuda.is_available():
                         torch_module.cuda.empty_cache()
             if desired_device == "cuda":
-                self.output_queue.put(
-                    ("progress", "Freeing grammar-model GPU memory before loading Whisper...\n")
-                )
+                self.output_queue.put(("progress", "Freeing grammar-model GPU memory before loading Whisper...\n"))
                 unload_gector()
                 gc.collect()
                 torch_module = get_torch(context="gui_transcriber:load_whisper_model")
@@ -2663,9 +2586,7 @@ class TranscriberGUI(QtWidgets.QMainWindow):
             else:
                 self.output_queue.put(("gpu_status", ("cpu", "")))
 
-            self.output_queue.put(
-                ("progress", f"Whisper '{requested_model_name}' loaded on {device.upper()} ({_compute_type})\n")
-            )
+            self.output_queue.put(("progress", f"Whisper '{requested_model_name}' loaded on {device.upper()} ({_compute_type})\n"))
             self.output_queue.put(("status", f"Whisper model ready ({device.upper()})", self.theme.colors.success_light))
             self.output_queue.put(("model_ready", device.upper()))
 
@@ -2776,7 +2697,7 @@ class TranscriberGUI(QtWidgets.QMainWindow):
                     if mic_index >= len(devices):
                         raise ValueError(f"Microphone index {mic_index} no longer valid (device disconnected?)")
                     device_info = devices[mic_index]
-                    if device_info.get('max_input_channels', 0) < 1:
+                    if device_info.get("max_input_channels", 0) < 1:
                         raise ValueError(f"Device '{device_info.get('name', mic_index)}' has no input channels")
                 except sd.PortAudioError as e:
                     self.output_queue.put(("error", f"Audio system error: {e}"))
@@ -2899,7 +2820,7 @@ class TranscriberGUI(QtWidgets.QMainWindow):
                 self.cancel_youtube_button.setVisible(False)
                 self.cancel_youtube_button.setEnabled(True)
                 # Flash error on YouTube card
-                if hasattr(self, '_youtube_card'):
+                if hasattr(self, "_youtube_card"):
                     self._flash_card_error(self._youtube_card)
             elif kind == "recording_reset":
                 if self.is_recording:
@@ -2924,7 +2845,7 @@ class TranscriberGUI(QtWidgets.QMainWindow):
                 self.transcribe_button.setEnabled(True)
                 self.cancel_youtube_button.setVisible(False)
                 self.cancel_youtube_button.setEnabled(True)
-                if success and hasattr(self, '_transcript_card'):
+                if success and hasattr(self, "_transcript_card"):
                     self._flash_card_success(self._transcript_card)
             elif kind == "transcribe_thread_done":
                 self.transcribe_thread = None
@@ -2933,7 +2854,7 @@ class TranscriberGUI(QtWidgets.QMainWindow):
                 self.transcribe_file_button.setEnabled(True)
                 self.browse_file_button.setEnabled(True)
                 self.transcribe_thread = None
-                if success and hasattr(self, '_transcript_card'):
+                if success and hasattr(self, "_transcript_card"):
                     self._flash_card_success(self._transcript_card)
             elif kind == "recording_thread_done":
                 self.recording_thread = None
@@ -2942,7 +2863,7 @@ class TranscriberGUI(QtWidgets.QMainWindow):
                 self.transcribe_thread = None
                 self.record_button.setEnabled(True)
                 self._set_microphone_selection_enabled(True)
-                if success and hasattr(self, '_transcript_card'):
+                if success and hasattr(self, "_transcript_card"):
                     self._flash_card_success(self._transcript_card)
             elif kind == "model_ready":
                 self._loading_model = False
@@ -2972,9 +2893,7 @@ class TranscriberGUI(QtWidgets.QMainWindow):
     def handle_clear(self) -> None:
         """Clear all text outputs."""
         if self.is_recording:
-            QtWidgets.QMessageBox.information(
-                self, "Recording in progress", "Stop the recording before clearing the transcript."
-            )
+            QtWidgets.QMessageBox.information(self, "Recording in progress", "Stop the recording before clearing the transcript.")
             return
 
         self.transcript_edit.clear()
@@ -3003,7 +2922,7 @@ class TranscriberGUI(QtWidgets.QMainWindow):
                     "File Exists",
                     f"The file '{os.path.basename(filename)}' already exists.\n\nDo you want to overwrite it?",
                     QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.No,
-                    QtWidgets.QMessageBox.StandardButton.No
+                    QtWidgets.QMessageBox.StandardButton.No,
                 )
                 if reply == QtWidgets.QMessageBox.StandardButton.No:
                     return
@@ -3033,7 +2952,7 @@ class TranscriberGUI(QtWidgets.QMainWindow):
                 srt_content = format_transcript_as_srt(self._current_segments_data)
                 handle.write(srt_content)
             else:
-                sentences = re.split(r'(?<=[.!?])\s+', content)
+                sentences = re.split(r"(?<=[.!?])\s+", content)
                 for idx, sentence in enumerate(sentences, start=1):
                     if not sentence.strip():
                         continue
@@ -3051,7 +2970,7 @@ class TranscriberGUI(QtWidgets.QMainWindow):
                 handle.write(json_content)
             return
 
-        sentences = re.split(r'(?<=[.!?])\s+', content)
+        sentences = re.split(r"(?<=[.!?])\s+", content)
         segments = [
             {
                 "id": idx,
@@ -3127,7 +3046,7 @@ class TranscriberGUI(QtWidgets.QMainWindow):
         Args:
             card: Card to flash.
         """
-        if hasattr(card, 'flash_glow'):
+        if hasattr(card, "flash_glow"):
             card.flash_glow("success", 600)
 
     def _flash_card_error(self, card: GlassCard) -> None:
@@ -3136,7 +3055,7 @@ class TranscriberGUI(QtWidgets.QMainWindow):
         Args:
             card: Card to flash.
         """
-        if hasattr(card, 'flash_glow'):
+        if hasattr(card, "flash_glow"):
             card.flash_glow("error", 600)
 
 

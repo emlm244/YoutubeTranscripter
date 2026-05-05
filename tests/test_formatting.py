@@ -62,12 +62,15 @@ class TestFormatTranscriptAsJson:
 
     def test_produces_valid_json(self, sample_segments):
         import json
+
         result = format_transcript_as_json(sample_segments)
         data = json.loads(result)
-        assert data == sample_segments
+        expected = [{"start": segment["start"], "end": segment["end"], "text": segment["text"].strip()} for segment in sample_segments]
+        assert data == expected
 
     def test_empty_segments(self):
         import json
+
         result = format_transcript_as_json([])
         data = json.loads(result)
         assert data == []

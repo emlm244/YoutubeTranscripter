@@ -213,9 +213,7 @@ class TestAppConfig:
                 "cpu_fallback_batch_size": 6,
             },
         }
-        with tempfile.NamedTemporaryFile(
-            mode="w", suffix=".json", delete=False
-        ) as f:
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
             json.dump(data, f)
             f.flush()
             cfg = AppConfig.load(Path(f.name))
@@ -287,6 +285,45 @@ class TestAppConfig:
         assert cfg.transcription.whisper_model == "large-v3"
         assert "distil-large-v3" in caplog.text
         assert "migrated to 'large-v3'" in caplog.text
+
+    def test_load_canonical_whisper_model_does_not_warn(self, caplog):
+        data = {"transcription": {"whisper_model": "large-v3"}}
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
+            json.dump(data, f)
+            f.flush()
+            with caplog.at_level("WARNING", logger="config"):
+                cfg = AppConfig.load(Path(f.name))
+
+        assert cfg.transcription.whisper_model == "large-v3"
+        assert "Legacy Whisper model" not in caplog.text
+
+    def test_load_coerces_nested_json_scalars(self):
+        data = {
+            "transcription": {
+                "batch_size": "12",
+                "vad_filter": "false",
+                "temperature": "0.25",
+                "word_timestamps": "off",
+                "noise_reduction_enabled": "no",
+                "normalize_audio": "yes",
+            },
+            "recording": {"sample_rate": "44100"},
+            "grammar": {"enabled": "true", "gector_batch_size": "4"},
+        }
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
+            json.dump(data, f)
+            f.flush()
+            cfg = AppConfig.load(Path(f.name))
+
+        assert cfg.transcription.batch_size == 12
+        assert cfg.transcription.vad_filter is False
+        assert cfg.transcription.temperature == 0.25
+        assert cfg.transcription.word_timestamps is False
+        assert cfg.transcription.noise_reduction_enabled is False
+        assert cfg.transcription.normalize_audio is True
+        assert cfg.recording.sample_rate == 44100
+        assert cfg.grammar.enabled is True
+        assert cfg.grammar.gector_batch_size == 4
 
     def test_load_non_mapping_json_returns_defaults(self):
         with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:

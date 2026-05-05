@@ -12,13 +12,12 @@ from pathlib import Path
 from typing import Optional
 
 from app_paths import get_config_path
+
 logger = logging.getLogger(__name__)
 
 DEFAULT_WHISPER_MODEL = "large-v3"
 
-WHISPER_MODEL_OPTIONS: tuple[tuple[str, str], ...] = (
-    ("large-v3", "Whisper Large v3"),
-)
+WHISPER_MODEL_OPTIONS: tuple[tuple[str, str], ...] = (("large-v3", "Whisper Large v3"),)
 
 BATCH_BACKEND_OPTIONS: tuple[tuple[str, str], ...] = (
     ("openai", "OpenAI"),
@@ -57,7 +56,6 @@ _WHISPER_MODEL_ALIASES: dict[str, str] = {
     "distil-large-v3.5": DEFAULT_WHISPER_MODEL,
     "distil-medium.en": DEFAULT_WHISPER_MODEL,
     "distil-small.en": DEFAULT_WHISPER_MODEL,
-    "large-v3": DEFAULT_WHISPER_MODEL,
     "large": DEFAULT_WHISPER_MODEL,
 }
 
@@ -293,9 +291,7 @@ def _normalize_prompt_whitespace(value: str) -> str:
     return " ".join(value.split())
 
 
-_NORMALIZED_LEGACY_INITIAL_PROMPTS = frozenset(
-    _normalize_prompt_whitespace(prompt) for prompt in _LEGACY_INITIAL_PROMPTS
-)
+_NORMALIZED_LEGACY_INITIAL_PROMPTS = frozenset(_normalize_prompt_whitespace(prompt) for prompt in _LEGACY_INITIAL_PROMPTS)
 
 
 def _coerce_initial_prompt(value: object, default: Optional[str]) -> Optional[str]:
@@ -341,17 +337,11 @@ class AppConfig:
     def __post_init__(self) -> None:
         """Validate configuration values after initialization."""
         if not (0.0 < self.gpu_memory_fraction <= 1.0):
-            raise ValueError(
-                f"gpu_memory_fraction must be between 0 and 1, got {self.gpu_memory_fraction}"
-            )
+            raise ValueError(f"gpu_memory_fraction must be between 0 and 1, got {self.gpu_memory_fraction}")
         if self.max_audio_size_mb <= 0:
-            raise ValueError(
-                f"max_audio_size_mb must be positive, got {self.max_audio_size_mb}"
-            )
+            raise ValueError(f"max_audio_size_mb must be positive, got {self.max_audio_size_mb}")
         if self.max_filename_length <= 0:
-            raise ValueError(
-                f"max_filename_length must be positive, got {self.max_filename_length}"
-            )
+            raise ValueError(f"max_filename_length must be positive, got {self.max_filename_length}")
 
     def save(self, path: Optional[Path] = None) -> None:
         """Save configuration to JSON file.
@@ -437,6 +427,54 @@ class AppConfig:
                     return numeric
                 return default
 
+            def _coerce_nonnegative_int(value: object, default: int) -> int:
+                if isinstance(value, bool):
+                    return default
+                if not isinstance(value, (int, float, str)):
+                    return default
+                try:
+                    numeric = int(value)
+                except (TypeError, ValueError):
+                    return default
+                if numeric >= 0:
+                    return numeric
+                return default
+
+            def _coerce_float(value: object, default: float) -> float:
+                if isinstance(value, bool):
+                    return default
+                if not isinstance(value, (int, float, str)):
+                    return default
+                try:
+                    return float(value)
+                except (TypeError, ValueError):
+                    return default
+
+            def _coerce_bool(value: object, default: bool) -> bool:
+                if isinstance(value, bool):
+                    return value
+                if isinstance(value, str):
+                    normalized = value.strip().lower()
+                    if normalized in {"1", "true", "yes", "on"}:
+                        return True
+                    if normalized in {"0", "false", "no", "off"}:
+                        return False
+                return default
+
+            def _coerce_str(value: object, default: str) -> str:
+                if not isinstance(value, str):
+                    return default
+                stripped = value.strip()
+                return stripped if stripped else default
+
+            def _coerce_optional_str(value: object, default: str | None) -> str | None:
+                if value is None:
+                    return default
+                if not isinstance(value, str):
+                    return default
+                stripped = value.strip()
+                return stripped if stripped else None
+
             # Load transcription settings
             t = data.get("transcription")
             if isinstance(t, dict):
@@ -466,101 +504,181 @@ class AppConfig:
                         default=config.transcription.openai_batch_model,
                     ),
                     whisper_model=normalized_whisper_model,
-                    device_preference=str(
-                        t.get("device_preference", config.transcription.device_preference)
-                    ).strip().lower() or config.transcription.device_preference,
-                    compute_type=str(
-                        t.get("compute_type", config.transcription.compute_type)
-                    ).strip().lower() or config.transcription.compute_type,
-                    beam_size=t.get("beam_size", 5),
-                    temperature=t.get("temperature", 0.0),
-                    vad_filter=t.get("vad_filter", True),
-                    no_speech_threshold=t.get("no_speech_threshold", 0.3),
-                    batch_size=t.get("batch_size", 32),
-                    cpu_fallback_batch_size=t.get(
-                        "cpu_fallback_batch_size",
+                    device_preference=_normalize_option(
+                        t.get("device_preference", config.transcription.device_preference),
+                        allowed={value for value, _label in DEVICE_PREFERENCE_OPTIONS},
+                        default=config.transcription.device_preference,
+                    ),
+                    compute_type=_normalize_option(
+                        t.get("compute_type", config.transcription.compute_type),
+                        allowed={value for value, _label in COMPUTE_TYPE_OPTIONS},
+                        default=config.transcription.compute_type,
+                    ),
+                    beam_size=_coerce_positive_int(t.get("beam_size", config.transcription.beam_size), config.transcription.beam_size),
+                    temperature=_coerce_float(t.get("temperature", config.transcription.temperature), config.transcription.temperature),
+                    vad_filter=_coerce_bool(t.get("vad_filter", config.transcription.vad_filter), config.transcription.vad_filter),
+                    no_speech_threshold=_coerce_float(
+                        t.get("no_speech_threshold", config.transcription.no_speech_threshold),
+                        config.transcription.no_speech_threshold,
+                    ),
+                    batch_size=_coerce_positive_int(t.get("batch_size", config.transcription.batch_size), config.transcription.batch_size),
+                    cpu_fallback_batch_size=_coerce_positive_int(
+                        t.get("cpu_fallback_batch_size", config.transcription.cpu_fallback_batch_size),
                         config.transcription.cpu_fallback_batch_size,
                     ),
-                    repetition_penalty=t.get("repetition_penalty", 1.2),
-                    no_repeat_ngram_size=t.get("no_repeat_ngram_size", 3),
+                    repetition_penalty=_coerce_float(
+                        t.get("repetition_penalty", config.transcription.repetition_penalty),
+                        config.transcription.repetition_penalty,
+                    ),
+                    no_repeat_ngram_size=_coerce_nonnegative_int(
+                        t.get("no_repeat_ngram_size", config.transcription.no_repeat_ngram_size),
+                        config.transcription.no_repeat_ngram_size,
+                    ),
                     # Advanced accuracy settings
-                    word_timestamps=t.get("word_timestamps", True),
-                    patience=t.get("patience", 1.0),
-                    length_penalty=t.get("length_penalty", 1.0),
-                    hallucination_silence_threshold=t.get("hallucination_silence_threshold", 0.5),
+                    word_timestamps=_coerce_bool(
+                        t.get("word_timestamps", config.transcription.word_timestamps),
+                        config.transcription.word_timestamps,
+                    ),
+                    patience=_coerce_float(t.get("patience", config.transcription.patience), config.transcription.patience),
+                    length_penalty=_coerce_float(
+                        t.get("length_penalty", config.transcription.length_penalty),
+                        config.transcription.length_penalty,
+                    ),
+                    hallucination_silence_threshold=_coerce_float(
+                        t.get(
+                            "hallucination_silence_threshold",
+                            config.transcription.hallucination_silence_threshold,
+                        ),
+                        config.transcription.hallucination_silence_threshold,
+                    ),
                     # VAD tuning
-                    vad_threshold=t.get("vad_threshold", 0.25),
-                    min_speech_duration_ms=t.get("min_speech_duration_ms", 50),
-                    min_silence_duration_ms=t.get("min_silence_duration_ms", 2000),
-                    speech_pad_ms=t.get("speech_pad_ms", 400),
+                    vad_threshold=_coerce_float(
+                        t.get("vad_threshold", config.transcription.vad_threshold), config.transcription.vad_threshold
+                    ),
+                    min_speech_duration_ms=_coerce_nonnegative_int(
+                        t.get("min_speech_duration_ms", config.transcription.min_speech_duration_ms),
+                        config.transcription.min_speech_duration_ms,
+                    ),
+                    min_silence_duration_ms=_coerce_nonnegative_int(
+                        t.get("min_silence_duration_ms", config.transcription.min_silence_duration_ms),
+                        config.transcription.min_silence_duration_ms,
+                    ),
+                    speech_pad_ms=_coerce_nonnegative_int(
+                        t.get("speech_pad_ms", config.transcription.speech_pad_ms),
+                        config.transcription.speech_pad_ms,
+                    ),
                     # Accuracy fields
                     initial_prompt=_coerce_initial_prompt(
                         saved_initial_prompt,
                         config.transcription.initial_prompt,
                     ),
-                    language=t.get("language", None),
-                    hotwords=t.get("hotwords", None),
+                    language=_coerce_optional_str(t.get("language", config.transcription.language), config.transcription.language),
+                    hotwords=_coerce_optional_str(t.get("hotwords", config.transcription.hotwords), config.transcription.hotwords),
                     condition_on_previous_text=(
                         False
                         if legacy_prompt_migration
-                        else t.get(
-                            "condition_on_previous_text",
+                        else _coerce_bool(
+                            t.get(
+                                "condition_on_previous_text",
+                                config.transcription.condition_on_previous_text,
+                            ),
                             config.transcription.condition_on_previous_text,
                         )
                     ),
-                    clean_filler_words=t.get("clean_filler_words", False),
+                    clean_filler_words=_coerce_bool(
+                        t.get("clean_filler_words", config.transcription.clean_filler_words),
+                        config.transcription.clean_filler_words,
+                    ),
                     filter_hallucinations=(
                         True
                         if legacy_prompt_migration
-                        else t.get(
-                            "filter_hallucinations",
+                        else _coerce_bool(
+                            t.get(
+                                "filter_hallucinations",
+                                config.transcription.filter_hallucinations,
+                            ),
                             config.transcription.filter_hallucinations,
                         )
                     ),
                     deduplicate_repeated_segments=(
                         True
                         if legacy_prompt_migration
-                        else t.get(
-                            "deduplicate_repeated_segments",
+                        else _coerce_bool(
+                            t.get(
+                                "deduplicate_repeated_segments",
+                                config.transcription.deduplicate_repeated_segments,
+                            ),
                             config.transcription.deduplicate_repeated_segments,
                         )
                     ),
                     # Audio preprocessing
-                    noise_reduction_enabled=t.get("noise_reduction_enabled", True),
-                    normalize_audio=t.get("normalize_audio", True),
+                    noise_reduction_enabled=_coerce_bool(
+                        t.get(
+                            "noise_reduction_enabled",
+                            config.transcription.noise_reduction_enabled,
+                        ),
+                        config.transcription.noise_reduction_enabled,
+                    ),
+                    normalize_audio=_coerce_bool(
+                        t.get("normalize_audio", config.transcription.normalize_audio),
+                        config.transcription.normalize_audio,
+                    ),
                 )
 
             # Load recording settings
             r = data.get("recording")
             if isinstance(r, dict):
                 config.recording = RecordingConfig(
-                    default_microphone=r.get("default_microphone", ""),
-                    sample_rate=r.get("sample_rate", 16000),
+                    default_microphone=_coerce_str(
+                        r.get("default_microphone", config.recording.default_microphone),
+                        config.recording.default_microphone,
+                    ),
+                    sample_rate=_coerce_positive_int(
+                        r.get("sample_rate", config.recording.sample_rate),
+                        config.recording.sample_rate,
+                    ),
                 )
 
             # Load UI settings
             u = data.get("ui")
             if isinstance(u, dict):
                 config.ui = UIConfig(
-                    last_youtube_url=u.get("last_youtube_url", ""),
-                    output_format=u.get("output_format", "plain"),
-                    transcription_preset=u.get("transcription_preset", "max_accuracy"),
+                    last_youtube_url=_coerce_str(
+                        u.get("last_youtube_url", config.ui.last_youtube_url),
+                        config.ui.last_youtube_url,
+                    ),
+                    output_format=_coerce_str(
+                        u.get("output_format", config.ui.output_format),
+                        config.ui.output_format,
+                    ),
+                    transcription_preset=_coerce_str(
+                        u.get("transcription_preset", config.ui.transcription_preset),
+                        config.ui.transcription_preset,
+                    ),
                 )
 
             # Load grammar settings
             g = data.get("grammar")
             if isinstance(g, dict):
-                grammar_backend = str(g.get("backend", config.grammar.backend)).strip().lower()
-                if grammar_backend not in {value for value, _ in GRAMMAR_BACKEND_OPTIONS}:
-                    grammar_backend = config.grammar.backend
+                grammar_backend = _normalize_option(
+                    g.get("backend", config.grammar.backend),
+                    allowed={value for value, _label in GRAMMAR_BACKEND_OPTIONS},
+                    default=config.grammar.backend,
+                )
 
                 config.grammar = GrammarConfig(
-                    enabled=g.get("enabled", False),
-                    language=g.get("language", "en-US"),
+                    enabled=_coerce_bool(g.get("enabled", config.grammar.enabled), config.grammar.enabled),
+                    language=_coerce_str(g.get("language", config.grammar.language), config.grammar.language),
                     backend=grammar_backend,
-                    gector_model=g.get("gector_model", "gotutiyan/gector-roberta-large-5k"),
-                    gector_batch_size=g.get("gector_batch_size", 8),
-                    gector_iterations=g.get("gector_iterations", 5),
+                    gector_model=_coerce_str(g.get("gector_model", config.grammar.gector_model), config.grammar.gector_model),
+                    gector_batch_size=_coerce_positive_int(
+                        g.get("gector_batch_size", config.grammar.gector_batch_size),
+                        config.grammar.gector_batch_size,
+                    ),
+                    gector_iterations=_coerce_positive_int(
+                        g.get("gector_iterations", config.grammar.gector_iterations),
+                        config.grammar.gector_iterations,
+                    ),
                 )
 
             if config.transcription.device_preference not in {value for value, _ in DEVICE_PREFERENCE_OPTIONS}:
@@ -631,4 +749,3 @@ def get_whisper_models_for_runtime(config: AppConfig | None = None) -> list[str]
         _append(normalize_whisper_model_name(preset.whisper_model))
 
     return ordered_models
-

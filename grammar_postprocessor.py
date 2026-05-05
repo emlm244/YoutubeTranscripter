@@ -141,6 +141,9 @@ def _resolve_cached_hf_repo_dir(repo_id: str, *, required_files: Sequence[str]) 
             return None
         resolved_paths.append(path)
 
+    snapshot_dirs = {path.parent for path in resolved_paths}
+    if len(snapshot_dirs) != 1:
+        return None
     return resolved_paths[0].parent if resolved_paths else None
 
 
@@ -315,6 +318,7 @@ def _get_languagetool(language: str = "en-US") -> Optional[Any]:  # -> language_
 
         try:
             import language_tool_python
+
             logger.info("Initializing LanguageTool...")
             try:
                 tool = language_tool_python.LanguageTool(
@@ -425,20 +429,14 @@ def _load_gector_model(model_id: str) -> Any:
             )
 
             # Extend embeddings for $START token
-            self.bert.resize_token_embeddings(
-                self.bert.config.vocab_size + 1,
-                mean_resizing=False
-            )
+            self.bert.resize_token_embeddings(self.bert.config.vocab_size + 1, mean_resizing=False)
 
             # Create projection layers
             self.label_proj_layer = nn.Linear(
                 self.bert.config.hidden_size,
-                config.num_labels - 1  # -1 for <PAD>
+                config.num_labels - 1,  # -1 for <PAD>
             )
-            self.d_proj_layer = nn.Linear(
-                self.bert.config.hidden_size,
-                config.d_num_labels - 1
-            )
+            self.d_proj_layer = nn.Linear(self.bert.config.hidden_size, config.d_num_labels - 1)
             self.dropout = nn.Dropout(config.p_dropout)
             self.loss_fn = CrossEntropyLoss(label_smoothing=config.label_smoothing)
 
@@ -681,6 +679,7 @@ class _GECToRManager:
 # Main Grammar Processor
 # =============================================================================
 
+
 class GrammarPostProcessor:
     """Handles grammar correction with GECToR (primary) and LanguageTool (fallback)."""
 
@@ -869,8 +868,9 @@ class GrammarPostProcessor:
     def _split_sentences(self, text: str) -> List[str]:
         """Split text into sentences for GECToR processing."""
         import re
+
         # Split on sentence-ending punctuation followed by whitespace
-        sentences = re.split(r'(?<=[.!?])\s+', text.strip())
+        sentences = re.split(r"(?<=[.!?])\s+", text.strip())
         return [s.strip() for s in sentences if s.strip()]
 
     def process_segments(
@@ -1005,6 +1005,7 @@ class GrammarPostProcessor:
 # Convenience Functions
 # =============================================================================
 
+
 @overload
 def post_process_grammar(
     text: str = "",
@@ -1115,4 +1116,3 @@ def unload_gector() -> None:
     """
     manager = _GECToRManager.get_instance()
     manager.unload()
-

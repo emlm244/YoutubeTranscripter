@@ -136,10 +136,10 @@ def inspect_gector_model(model_id: str) -> PreflightItem:
             resolve_hf_file_from_cache(model_id, "tokenizer_config.json"),
         ]
         try:
-            resolve_hf_file_from_cache(model_id, "tokenizer.json")
+            cached_paths.append(resolve_hf_file_from_cache(model_id, "tokenizer.json"))
         except FileNotFoundError:
-            resolve_hf_file_from_cache(model_id, "vocab.json")
-            resolve_hf_file_from_cache(model_id, "merges.txt")
+            cached_paths.append(resolve_hf_file_from_cache(model_id, "vocab.json"))
+            cached_paths.append(resolve_hf_file_from_cache(model_id, "merges.txt"))
     except Exception:
         return PreflightItem(
             label,
@@ -221,10 +221,7 @@ def collect_preflight_items(
     app_config = config or get_config()
     items: list[PreflightItem] = []
     if app_config.transcription.batch_backend in {"local_whisper", "compare"}:
-        items.extend(
-            inspect_whisper_model(model_name)
-            for model_name in get_whisper_models_for_runtime(app_config)
-        )
+        items.extend(inspect_whisper_model(model_name) for model_name in get_whisper_models_for_runtime(app_config))
 
     if app_config.grammar.enabled:
         items.append(inspect_gector_model(app_config.grammar.gector_model))
@@ -254,4 +251,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

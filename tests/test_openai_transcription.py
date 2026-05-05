@@ -133,4 +133,4 @@ def test_ffprobe_duration_timeout_returns_none_and_uses_media_timeout(monkeypatc
     monkeypatch.setattr(yt.subprocess, "run", _timeout_run)
 
     assert yt._ffprobe_duration_seconds(str(audio_path), None) is None
-    assert captured["timeout"] == yt.MEDIA_CMD_TIMEOUT
+    assert captured["timeout"] == yt.MEDIA_PROBE_TIMEOUT
