@@ -9,12 +9,14 @@ class TestValidateYoutubeUrl:
     """Test validate_youtube_url function."""
 
     def test_standard_url(self):
-        is_valid, _ = validate_youtube_url("https://www.youtube.com/watch?v=dQw4w9WgXcQ")
+        is_valid, error = validate_youtube_url("https://www.youtube.com/watch?v=dQw4w9WgXcQ")
         assert is_valid
+        assert error is None
 
     def test_short_url(self):
-        is_valid, _ = validate_youtube_url("https://youtu.be/dQw4w9WgXcQ")
+        is_valid, error = validate_youtube_url("https://youtu.be/dQw4w9WgXcQ")
         assert is_valid
+        assert error is None
 
     def test_rejects_youtube_url_without_video_id(self):
         is_valid, error = validate_youtube_url("https://www.youtube.com/watch?feature=share")
@@ -34,10 +36,12 @@ class TestValidateYoutubeUrl:
     def test_non_youtube_url(self):
         is_valid, error = validate_youtube_url("https://example.com/video")
         assert not is_valid
+        assert error == "Invalid domain: example.com. Expected a YouTube URL."
 
     def test_invalid_url(self):
         is_valid, error = validate_youtube_url("not a url")
         assert not is_valid
+        assert error == "URL must start with http:// or https://"
 
 
 class TestExtractVideoId:

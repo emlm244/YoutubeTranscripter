@@ -44,7 +44,8 @@ class TestCleanFillerWords:
 
     def test_removes_basically_filler(self):
         result = clean_filler_words("Basically, we need to fix this")
-        assert result.startswith("we") or result.startswith("We") or "we need" in result
+        assert "basically" not in result.lower()
+        assert "we need to fix this" in result.lower()
 
     def test_removes_like_filler(self):
         result = clean_filler_words("It was like, really hard")

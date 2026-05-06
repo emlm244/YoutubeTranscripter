@@ -30,7 +30,7 @@ def mock_whisper_model():
     model = MagicMock()
 
     class FakeSegment:
-        def __init__(self, start, end, text):
+        def __init__(self, start, end, text) -> None:
             self.start = start
             self.end = end
             self.text = text

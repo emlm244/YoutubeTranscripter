@@ -41,5 +41,7 @@ class TestDeduplicateSegments:
         result, count, indices = deduplicate_segments(
             segments, return_indices=True
         )
+        assert count == 3
         assert isinstance(indices, list)
-        assert "B." in result
+        assert indices == [0, 4]
+        assert result == ["A.", "B."]

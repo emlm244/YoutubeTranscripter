@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import contextlib
+import re
 from typing import Optional
 
 from PyQt6 import QtCore, QtGui, QtWidgets
@@ -130,12 +132,11 @@ class GlassCard(QtWidgets.QFrame):
             }}
         """
 
-    def _apply_elevation(self, level: int, animated: bool = False) -> None:
+    def _apply_elevation(self, level: int) -> None:
         """Apply elevation shadow effect.
 
         Args:
             level: Elevation level (0-4).
-            animated: Whether to animate the transition.
         """
         self._current_elevation = level
 
@@ -191,10 +192,8 @@ class GlassCard(QtWidgets.QFrame):
 
         # Disconnect to avoid repeated calls
         if self._fade_anim:
-            try:
+            with contextlib.suppress(TypeError):
                 self._fade_anim.finished.disconnect(self._on_reveal_finished)
-            except TypeError:
-                pass  # Already disconnected
 
     def reveal(self, delay: int = 0) -> None:
         """Manually trigger reveal animation.
@@ -337,7 +336,6 @@ class GlassCard(QtWidgets.QFrame):
 
         # Parse rgba color
         # Format: rgba(r, g, b, a)
-        import re
         match = re.match(r'rgba\((\d+),\s*(\d+),\s*(\d+),\s*([\d.]+)\)', glow_color)
         if not match:
             return
@@ -358,11 +356,9 @@ class GlassCard(QtWidgets.QFrame):
         self.setGraphicsEffect(glow_effect)
 
         # Animate back to normal shadow after duration
-        def restore_shadow():
-            try:
+        def restore_shadow() -> None:
+            with contextlib.suppress(RuntimeError):
                 self._apply_elevation(self._elevation)
-            except RuntimeError:
-                pass  # Widget may have been deleted
 
         QtCore.QTimer.singleShot(duration, restore_shadow)
 

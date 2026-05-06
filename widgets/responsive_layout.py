@@ -1,4 +1,4 @@
-"""Responsive layout components for YouTube Transcriber."""
+"""Responsive layout components for the transcription app."""
 
 from __future__ import annotations
 
@@ -17,7 +17,7 @@ class Breakpoint(Enum):
     LARGE = auto()      # > 1920px
 
     @classmethod
-    def from_width(cls, width: int) -> "Breakpoint":
+    def from_width(cls, width: int) -> Breakpoint:
         """Determine breakpoint from window width.
 
         Args:
@@ -28,12 +28,11 @@ class Breakpoint(Enum):
         """
         if width < 800:
             return cls.COMPACT
-        elif width < 1280:
+        if width < 1280:
             return cls.MEDIUM
-        elif width < 1920:
+        if width < 1920:
             return cls.EXPANDED
-        else:
-            return cls.LARGE
+        return cls.LARGE
 
 
 class ResponsiveSplitter(QtWidgets.QSplitter):
@@ -45,10 +44,10 @@ class ResponsiveSplitter(QtWidgets.QSplitter):
 
     # Splitter ratios for each breakpoint
     BREAKPOINT_RATIOS = {
-        Breakpoint.COMPACT: [0.30, 0.10, 0.60],    # Minimize preview/progress
-        Breakpoint.MEDIUM: [0.35, 0.15, 0.50],     # Balanced
-        Breakpoint.EXPANDED: [0.40, 0.20, 0.40],   # Full features
-        Breakpoint.LARGE: [0.35, 0.15, 0.50],      # More transcript space
+        Breakpoint.COMPACT: [0.42, 0.58],    # Keep transcript dominant on small screens
+        Breakpoint.MEDIUM: [0.45, 0.55],     # Balanced
+        Breakpoint.EXPANDED: [0.48, 0.52],   # More room for the verbose progress log
+        Breakpoint.LARGE: [0.44, 0.56],      # Slightly favor transcript space
     }
 
     breakpointChanged = QtCore.pyqtSignal(Breakpoint)
@@ -105,14 +104,14 @@ class ResponsiveSplitter(QtWidgets.QSplitter):
 
                 self.breakpointChanged.emit(new_breakpoint)
 
-    def _apply_breakpoint_ratios(self, breakpoint: Breakpoint) -> None:
+    def _apply_breakpoint_ratios(self, target_breakpoint: Breakpoint) -> None:
         """Apply splitter ratios for the given breakpoint.
 
         Args:
-            breakpoint: Target breakpoint.
+            target_breakpoint: Target breakpoint.
         """
         ratios = self.BREAKPOINT_RATIOS.get(
-            breakpoint, self.BREAKPOINT_RATIOS[Breakpoint.EXPANDED]
+            target_breakpoint, self.BREAKPOINT_RATIOS[Breakpoint.EXPANDED]
         )
 
         # Calculate sizes based on total available space
@@ -130,13 +129,24 @@ class ResponsiveSplitter(QtWidgets.QSplitter):
             return
 
         # Use ratios for the first N widgets
+        active_ratios = ratios[:num_widgets]
+        ratio_total = sum(active_ratios) if active_ratios else 0.0
+        remaining_slots = num_widgets - len(active_ratios)
+        if active_ratios and remaining_slots == 0 and ratio_total > 0:
+            active_ratios = [ratio / ratio_total for ratio in active_ratios]
+            ratio_total = 1.0
+        elif active_ratios and remaining_slots > 0 and ratio_total >= 1.0:
+            available_ratio = len(active_ratios) / num_widgets
+            active_ratios = [ratio * (available_ratio / ratio_total) for ratio in active_ratios]
+            ratio_total = sum(active_ratios)
+
         new_sizes = []
         for i in range(num_widgets):
-            if i < len(ratios):
-                new_sizes.append(int(total_size * ratios[i]))
+            if i < len(active_ratios):
+                new_sizes.append(int(total_size * active_ratios[i]))
             else:
                 # Distribute remaining space equally
-                remaining_ratio = (1.0 - sum(ratios)) / (num_widgets - len(ratios))
+                remaining_ratio = max(1.0 - ratio_total, 0.0) / max(remaining_slots, 1)
                 new_sizes.append(int(total_size * remaining_ratio))
 
         self.setSizes(new_sizes)

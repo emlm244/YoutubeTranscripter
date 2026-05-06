@@ -44,7 +44,7 @@ class TestPostProcessGrammar:
 
     def test_with_disabled_config(self):
         config = GrammarConfig(enabled=False)
-        text, segments, enhanced = post_process_grammar(
+        text, _segments, enhanced = post_process_grammar(
             text="hello", config=config
         )
         assert text == "hello"
@@ -53,7 +53,7 @@ class TestPostProcessGrammar:
     def test_with_segments_disabled(self):
         config = GrammarConfig(enabled=False)
         segs = [{"start": 0, "end": 1, "text": "hello"}]
-        text, result_segs, enhanced = post_process_grammar(
+        _text, result_segs, enhanced = post_process_grammar(
             text="hello", segments_data=segs, config=config
         )
         assert not enhanced
@@ -70,15 +70,15 @@ class TestCheckGrammarStatus:
 
     def test_returns_tuple_for_eager_status(self, monkeypatch):
         monkeypatch.setattr(gp.GrammarPostProcessor, "get_status", lambda self: "LanguageTool")
-        available, status = check_grammar_status()
+        available, status = check_grammar_status(lazy=False)
         assert available is True
         assert status == "LanguageTool"
         assert isinstance(available, bool)
         assert isinstance(status, str)
 
-    def test_lazy_status_stays_hermetic(self, monkeypatch):
+    def test_default_status_stays_hermetic(self, monkeypatch):
         monkeypatch.setattr(gp.GrammarPostProcessor, "peek_status", lambda self: "GECToR (downloads model on demand)")
-        available, status = check_grammar_status(lazy=True)
+        available, status = check_grammar_status()
         assert available is True
         assert status == "GECToR (downloads model on demand)"
 

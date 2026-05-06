@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+from contextlib import suppress
 import os
 import sys
 import traceback
 from pathlib import Path
+from types import ModuleType
 
 APP_DIR_NAME = "YouTubeTranscriber"
 _WINDOWS_DLL_DIRECTORY_HANDLES: list[object] = []
@@ -123,7 +125,7 @@ def get_runtime_dll_search_roots() -> list[Path]:
     return _dedupe_resolved_paths(roots)
 
 
-def _load_ctypes_module():
+def _load_ctypes_module() -> ModuleType:
     """Import ctypes lazily so tests can patch the loader without touching sys.modules."""
     import ctypes
 
@@ -263,7 +265,5 @@ def configure_runtime_environment() -> None:
         _configure_windows_dll_search_paths()
 
     if is_frozen_app():
-        try:
+        with suppress(OSError):
             os.chdir(get_writable_app_data_root())
-        except OSError:
-            pass

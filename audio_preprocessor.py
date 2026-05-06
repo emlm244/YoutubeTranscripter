@@ -6,10 +6,12 @@ applied before audio is sent to Whisper.
 
 from __future__ import annotations
 
+import contextlib
 import logging
+import os
+import shutil
 import subprocess
 import tempfile
-import os
 
 import numpy as np
 
@@ -20,6 +22,7 @@ def _noisereduce_available() -> bool:
     """Check if noisereduce library is installed."""
     try:
         import noisereduce  # noqa: F401
+
         return True
     except ImportError:
         return False
@@ -80,25 +83,52 @@ def normalize_loudness_file(
     Returns:
         True on success, False on failure.
     """
+    temp_output_path: str | None = None
+    ffmpeg_output_path = output_path
+    if os.path.abspath(input_path) == os.path.abspath(output_path):
+        output_dir = os.path.dirname(os.path.abspath(output_path)) or None
+        fd_out, temp_output_path = tempfile.mkstemp(suffix=".wav", dir=output_dir)
+        os.close(fd_out)
+        ffmpeg_output_path = temp_output_path
+
     cmd = [
         ffmpeg_cmd,
         "-y",
-        "-v", "error",
+        "-v",
+        "error",
         "-nostdin",
-        "-i", input_path,
-        "-af", f"loudnorm=I={target_lufs}:TP=-1.5:LRA=11",
-        "-ar", "16000",
-        "-ac", "1",
-        "-acodec", "pcm_s16le",
-        output_path,
+        "-i",
+        input_path,
+        "-af",
+        f"loudnorm=I={target_lufs}:TP=-1.5:LRA=11",
+        "-ar",
+        "16000",
+        "-ac",
+        "1",
+        "-acodec",
+        "pcm_s16le",
+        ffmpeg_output_path,
     ]
     try:
         subprocess.run(cmd, check=True, capture_output=True)
+        if temp_output_path is not None:
+            try:
+                os.replace(temp_output_path, output_path)
+            except OSError:
+                try:
+                    shutil.move(temp_output_path, output_path)
+                except OSError as move_exc:
+                    logger.warning("Loudness normalization failed during final move (%s); skipping", move_exc)
+                    return False
         logger.info("Audio loudness normalized to %.1f LUFS", target_lufs)
         return True
-    except (FileNotFoundError, subprocess.CalledProcessError) as exc:
+    except (FileNotFoundError, OSError, subprocess.CalledProcessError) as exc:
         logger.warning("Loudness normalization failed (%s); skipping", exc)
         return False
+    finally:
+        if temp_output_path is not None:
+            with contextlib.suppress(OSError):
+                os.unlink(temp_output_path)
 
 
 def normalize_loudness_array(
@@ -138,9 +168,7 @@ def normalize_loudness_array(
             wf.setframerate(sample_rate)
             wf.writeframes(pcm.tobytes())
 
-        if not normalize_loudness_file(
-            tmp_in, tmp_out, target_lufs=target_lufs, ffmpeg_cmd=ffmpeg_cmd
-        ):
+        if not normalize_loudness_file(tmp_in, tmp_out, target_lufs=target_lufs, ffmpeg_cmd=ffmpeg_cmd):
             return audio
 
         # Read normalized WAV back
@@ -154,10 +182,8 @@ def normalize_loudness_array(
         return audio
     finally:
         for p in (tmp_in, tmp_out):
-            try:
+            with contextlib.suppress(OSError):
                 os.unlink(p)
-            except OSError:
-                pass
 
 
 def preprocess_file(
@@ -194,6 +220,7 @@ def preprocess_file(
     if noise_reduction and _noisereduce_available():
         try:
             import wave
+
             with wave.open(input_path, "rb") as wf:
                 sr = wf.getframerate()
                 raw = wf.readframes(wf.getnframes())
@@ -247,8 +274,10 @@ def preprocess_array(
 
     if normalize:
         audio = normalize_loudness_array(
-            audio, sample_rate=sample_rate,
-            target_lufs=target_lufs, ffmpeg_cmd=ffmpeg_cmd,
+            audio,
+            sample_rate=sample_rate,
+            target_lufs=target_lufs,
+            ffmpeg_cmd=ffmpeg_cmd,
         )
 
     return audio

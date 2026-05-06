@@ -2,7 +2,7 @@
 setlocal enabledelayedexpansion
 
 echo ========================================
-echo   YouTube Transcriber - Smart Launcher
+echo   Speech Transcriber - Smart Launcher
 echo ========================================
 echo.
 
@@ -164,8 +164,8 @@ if !FIRST_RUN!==1 (
     )
     echo [OK] All dependencies installed
 ) else (
-    REM Quick check - validate the same startup path the GUI uses.
-    python -c "import gui_runtime_bootstrap, youtube_transcript_api, faster_whisper, yt_dlp, sounddevice, language_tool_python, transformers, gector, PyQt6" >nul 2>&1
+    REM Fast presence check on normal launches; avoid importing the full AI stack every time.
+    python -c "import importlib.util; pkgs=['gui_runtime_bootstrap','youtube_transcript_api','faster_whisper','yt_dlp','sounddevice','language_tool_python','transformers','gector','PyQt6','openai','numpy','noisereduce']; missing=[p for p in pkgs if importlib.util.find_spec(p) is None]; raise SystemExit(1 if missing else 0)" >nul 2>&1
     if errorlevel 1 (
         echo Dependencies missing or outdated. Installing...
         pip install -q -r requirements.txt
@@ -181,7 +181,8 @@ if !FIRST_RUN!==1 (
             exit /b 1
         )
 
-        python -c "import gui_runtime_bootstrap, youtube_transcript_api, faster_whisper, yt_dlp, sounddevice, language_tool_python, transformers, gector, PyQt6" >nul 2>&1
+        REM Only run the heavier import validation after a repair/install path.
+        python -c "import gui_runtime_bootstrap, youtube_transcript_api, faster_whisper, yt_dlp, sounddevice, language_tool_python, transformers, gector, PyQt6, openai, numpy, noisereduce" >nul 2>&1
         if errorlevel 1 (
             echo [ERROR] Dependencies still failed validation after installation
             echo.
@@ -200,6 +201,7 @@ if not errorlevel 1 (
     python -c "import torch; raise SystemExit(0 if getattr(torch.version, 'cuda', None) else 1)" >nul 2>&1
     if errorlevel 1 (
         echo [INFO] NVIDIA GPU detected but PyTorch is CPU-only. Installing CUDA-enabled PyTorch nightly wheels...
+        echo [INFO] Nightly PyTorch wheels are used here because the matching CUDA 12.8 build may not exist on the stable channel yet.
         pip install --upgrade --pre torch torchvision torchaudio --index-url https://download.pytorch.org/whl/nightly/cu128
         if errorlevel 1 (
             echo [WARNING] CUDA-enabled PyTorch install failed. Whisper can still use CTranslate2 CUDA, but torch-backed grammar features will stay on CPU.
@@ -275,13 +277,18 @@ if defined FFMPEG_LOCATION (
 )
 echo.
 
-echo Checking first-run AI model downloads...
-python launcher_preflight.py || echo [WARNING] Could not determine model cache status. The application can still continue.
-echo.
+if /I "!YT_VERBOSE_STARTUP!"=="1" (
+    echo Checking first-run AI model downloads...
+    python launcher_preflight.py || echo [WARNING] Could not determine model cache status. The application can still continue.
+    echo.
 
-echo Checking GPU acceleration support...
-python -c "from torch_runtime import get_torch; from youtube_transcriber import get_whisper_cuda_status; torch = get_torch(context='run_gui:gpu_check'); fw_ok, fw_name = get_whisper_cuda_status(); print('[OK] PyTorch with CUDA:', bool(torch and torch.cuda.is_available())); print('[OK] faster-whisper CUDA backend:', fw_ok, fw_name if fw_name else '')" 2>nul || echo [INFO] GPU check failed - application will auto-fallback to CPU mode
-echo.
+    echo Checking GPU acceleration support...
+    python -c "from torch_runtime import get_torch; from youtube_transcriber import get_whisper_cuda_status; torch = get_torch(context='run_gui:gpu_check'); fw_ok, fw_name = get_whisper_cuda_status(); print('[OK] PyTorch with CUDA:', bool(torch and torch.cuda.is_available())); print('[OK] faster-whisper CUDA backend:', fw_ok, fw_name if fw_name else '')" 2>nul || echo [INFO] GPU check failed - application will auto-fallback to CPU mode
+    echo.
+) else (
+    echo [INFO] Skipping optional startup diagnostics for faster launch. Set YT_VERBOSE_STARTUP=1 to re-enable them.
+    echo.
+)
 
 set "GUI_LOG_PATH="
 set "CORE_LOG_PATH="
@@ -296,7 +303,7 @@ REM ============================================
 REM Launch Application
 REM ============================================
 echo ========================================
-echo   Launching YouTube Transcriber GUI
+echo   Launching Speech Transcriber GUI
 echo ========================================
 echo.
 echo Runtime paths:
